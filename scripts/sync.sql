@@ -5,12 +5,12 @@ BEGIN TRANSACTION;
 INSERT INTO main.match_results (
   settle_id, room_id, winner, duration_text, bg, battle_type, game_mode,
   extra_packet, extended_seeds, ban_mode, balance_patch,
-  mower_loss, target_loss, sunflower_loss, grave_loss, finished_at
+  mower_loss, target_loss, sunflower_loss, grave_loss, plant_name, zombie_name, finished_at
 )
 SELECT
   s.settle_id, s.room_id, s.winner, s.duration_text, s.bg, s.battle_type, s.game_mode,
   s.extra_packet, s.extended_seeds, s.ban_mode, s.balance_patch,
-  s.mower_loss, s.target_loss, s.sunflower_loss, s.grave_loss, s.finished_at
+  s.mower_loss, s.target_loss, s.sunflower_loss, s.grave_loss, COALESCE(s.plant_name,''), COALESCE(s.zombie_name,''), s.finished_at
 FROM slave.match_results s
 LEFT JOIN main.match_results m ON m.settle_id = s.settle_id
 WHERE m.settle_id IS NULL;

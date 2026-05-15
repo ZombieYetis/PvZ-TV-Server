@@ -16,11 +16,13 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 final class DashboardServer {
     private static final String DB_URL = "jdbc:sqlite:data/pvz_metrics.db";
     private static final int SUNFLOWER_SEED = 1;
     private static final int GRAVESTONE_SEED = 61;
+    private static final CopyOnWriteArrayList<OutputStream> STREAM_CLIENTS = new CopyOnWriteArrayList<>();
 
     private DashboardServer() {
     }
@@ -30,7 +32,9 @@ final class DashboardServer {
         server.createContext("/", new IndexHandler());
         server.createContext("/api/top-decks", new TopDecksHandler());
         server.createContext("/api/card-stats", new CardStatsHandler());
+        server.createContext("/api/recent-matches", new RecentMatchesHandler());
         server.createContext("/api/seed-names", new SeedNamesHandler());
+        server.createContext("/api/stream", new StreamHandler());
         server.setExecutor(null);
         server.start();
         System.out.println("[DASHBOARD] http://0.0.0.0:" + port + "/");
@@ -102,6 +106,53 @@ final class DashboardServer {
             }
             sb.append("]}");
             writeText(exchange, 200, sb.toString(), "application/json; charset=utf-8");
+        }
+    }
+
+    private static final class RecentMatchesHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                writeText(exchange, 405, "{\"error\":\"method_not_allowed\"}", "application/json; charset=utf-8");
+                return;
+            }
+            writeText(exchange, 200, queryRecentMatchesJson(), "application/json; charset=utf-8");
+        }
+    }
+
+    private static final class StreamHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                writeText(exchange, 405, "Method Not Allowed", "text/plain; charset=utf-8");
+                return;
+            }
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+            exchange.getResponseHeaders().set("Cache-Control", "no-cache");
+            exchange.getResponseHeaders().set("Connection", "keep-alive");
+            exchange.sendResponseHeaders(200, 0);
+            OutputStream os = exchange.getResponseBody();
+            STREAM_CLIENTS.add(os);
+            try {
+                os.write("event: hello\ndata: ok\n\n".getBytes(StandardCharsets.UTF_8));
+                os.flush();
+            } catch (IOException e) {
+                STREAM_CLIENTS.remove(os);
+                try { os.close(); } catch (IOException ignored) {}
+            }
+        }
+    }
+
+    static void notifyDataUpdated() {
+        byte[] payload = "event: settle\ndata: 1\n\n".getBytes(StandardCharsets.UTF_8);
+        for (OutputStream os : STREAM_CLIENTS) {
+            try {
+                os.write(payload);
+                os.flush();
+            } catch (IOException e) {
+                STREAM_CLIENTS.remove(os);
+                try { os.close(); } catch (IOException ignored) {}
+            }
         }
     }
 
@@ -315,6 +366,30 @@ final class DashboardServer {
         return sb.toString();
     }
 
+    private static String queryRecentMatchesJson() {
+        final String sql = "SELECT finished_at, winner, plant_name, zombie_name, duration_text FROM match_results ORDER BY id DESC LIMIT 20";
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"items\":[");
+        boolean first = true;
+        try (Connection conn = DriverManager.getConnection(DB_URL);
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                if (!first) sb.append(',');
+                first = false;
+                sb.append("{\"finished_at\":\"").append(jsonEscape(rs.getString("finished_at"))).append("\",")
+                        .append("\"winner\":\"").append(jsonEscape(rs.getString("winner"))).append("\",")
+                        .append("\"plant_name\":\"").append(jsonEscape(rs.getString("plant_name"))).append("\",")
+                        .append("\"zombie_name\":\"").append(jsonEscape(rs.getString("zombie_name"))).append("\",")
+                        .append("\"duration\":\"").append(jsonEscape(rs.getString("duration_text"))).append("\"}");
+            }
+        } catch (Exception e) {
+            return "{\"items\":[],\"error\":\"" + jsonEscape(e.getMessage()) + "\"}";
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
     private static String coreNameForSide(String deckIds, boolean zh, String side) {
         List<Integer> ids = parseDeckIds(deckIds);
         List<Integer> nonProducer = new ArrayList<>();
@@ -389,6 +464,7 @@ final class DashboardServer {
                 "th,td{padding:6px 8px;border-bottom:1px solid #edf1f7;text-align:left}" +
                 "th{background:var(--tableHead);position:sticky;top:0}" +
                 "#cardsWrap{height:640px;overflow:auto;border:1px solid var(--panelLine);border-radius:10px;background:var(--panel)}" +
+                "#recentWrap{max-height:320px;overflow:auto;border:1px solid var(--panelLine);border-radius:10px;background:var(--panel)}" +
                 "@media (max-width:1180px){.layout{grid-template-columns:1fr}.deck-wrap{grid-template-columns:1fr}.deck-list{height:460px}#cardsWrap{height:500px}.controls{display:flex;flex-wrap:wrap;justify-content:center}.actions{justify-self:auto}}" +
                 "</style></head><body>" +
                 "<div class='top'><div><h1 id='topTitle'>PvZ_TV 对战大数据</h1><div class='muted' id='subTitle'>每5秒自动刷新</div></div>" +
@@ -397,6 +473,7 @@ final class DashboardServer {
                 "<div class='card'><div class='card-head'><h3 id='deckTitle'>Top 15 卡组</h3><div class='seg'><button id='sidePlant' class='btn active'>植物</button><button id='sideZombie' class='btn'>僵尸</button></div></div><div class='deck-wrap'><div class='pie-box'><canvas id='pie' width='420' height='420'></canvas></div><div id='deckList' class='deck-list'></div></div></div>" +
                 "<div class='card'><h3 id='cardTitle'>单卡统计</h3><div id='cardsWrap'><table id='cards'><thead><tr><th id='thCard'>卡牌</th><th id='thPick'>选取</th><th id='thBan'>禁用</th><th id='thWin'>胜场</th><th id='thWr'>胜率</th><th id='thPr'>选取率</th><th id='thBr'>禁用率</th><th id='thTr'>针对率</th></tr></thead><tbody></tbody></table></div></div>" +
                 "</div>" +
+                "<div class='card' style='margin-top:14px'><h3>Recent Matches</h3><div id='recentWrap'><table id='recent'><thead><tr><th>Time</th><th>Plant</th><th>Zombie</th><th>Winner</th><th>Duration</th></tr></thead><tbody></tbody></table></div></div>" +
                 "<script>" +
                 "let lang='zh';let side='PLANT';let names={};let decks=[];let hoverDeck='';let extraPacket='false';let balancePatch='true';let banMode='false';let mode='DAY';let theme=(localStorage.getItem('pvz_theme')||'light');" +
                 "const i18n={zh:{title:'PvZ_TV 对战大数据',deckTitle:'Top 15 卡组',cardTitle:'单卡统计',sub:'每5秒自动刷新',card:'卡牌',pick:'选取',ban:'禁用',win:'胜场',wr:'胜率',pr:'选取率',br:'禁用率',tr:'针对率',trTip:'被禁次数 / 被选次数',plant:'植物',zombie:'僵尸',unknown:'未知卡牌',sideSuffix:'方',rate:'胜率',plays:'对局',extraOff:'额外卡槽: 关',extraOn:'额外卡槽: 开',bpOn:'平衡调整: 开',bpOff:'平衡调整: 关',modeDay:'白天',modeNight:'黑夜',modePool:'泳池白天',modeFog:'泳池黑夜',modeRoof:'屋顶',themeLight:'☀日间',themeDark:'🌙夜间'},en:{title:'PvZ_TV Battle Data',deckTitle:'Top 15 Decks',cardTitle:'Card Stats',sub:'Auto refresh every 5s',card:'Card',pick:'Pick',ban:'Ban',win:'Wins',wr:'Win Rate',pr:'Pick Rate',br:'Ban Rate',tr:'Target Rate',trTip:'Banned Count / Picked Count',plant:'Plant',zombie:'Zombie',unknown:'UnknownSeed',sideSuffix:'',rate:'Win Rate',plays:'Plays',extraOff:'Extra Slot: Off',extraOn:'Extra Slot: On',bpOn:'Balance Patch: On',bpOff:'Balance Patch: Off',modeDay:'Day',modeNight:'Night',modePool:'Pool Day',modeFog:'Pool Night',modeRoof:'Roof',themeLight:'☀Light',themeDark:'🌙Dark'}};" +
@@ -414,7 +491,8 @@ final class DashboardServer {
                 "function qs(){return 'side='+encodeURIComponent(side)+'&extra_packet='+encodeURIComponent(extraPacket)+'&balance_patch='+encodeURIComponent(balancePatch)+'&ban_mode='+encodeURIComponent(banMode)+'&mode='+encodeURIComponent(mode)}" +
                 "async function loadDecks(){const r=await fetch('/api/top-decks?'+qs());const j=await r.json();decks=j.items||[];if(hoverDeck && !decks.some(d=>d.deck_ids===hoverDeck))hoverDeck='';renderDecks();drawPie();}" +
                 "async function loadCards(){const r=await fetch('/api/card-stats?'+qs());const j=await r.json();const tb=document.querySelector('#cards tbody');tb.innerHTML='';const on=(banMode==='true');(j.items||[]).forEach(it=>{const tr=document.createElement('tr');tr.innerHTML=on?('<td>'+cardName(it.seed_type,it.seed_en,it.seed_zh)+'</td><td>'+it.picked+'</td><td>'+it.banned+'</td><td>'+it.won+'</td><td>'+pct(it.win_rate)+'</td><td>'+pct(it.pick_rate)+'</td><td>'+pct(it.ban_rate)+'</td><td>'+pct(it.target_rate)+'</td>'):('<td>'+cardName(it.seed_type,it.seed_en,it.seed_zh)+'</td><td>'+it.picked+'</td><td>'+it.won+'</td><td>'+pct(it.win_rate)+'</td><td>'+pct(it.pick_rate)+'</td>');tb.appendChild(tr);});}" +
-                "async function tick(){await Promise.all([loadDecks(),loadCards()]);}" +
+                "async function loadRecent(){const r=await fetch('/api/recent-matches');const j=await r.json();const tb=document.querySelector('#recent tbody');tb.innerHTML='';(j.items||[]).forEach(it=>{const tr=document.createElement('tr');const p=it.plant_name&&it.plant_name.length?it.plant_name:'-';const z=it.zombie_name&&it.zombie_name.length?it.zombie_name:'-';tr.innerHTML='<td>'+it.finished_at+'</td><td>'+p+'</td><td>'+z+'</td><td>'+it.winner+'</td><td>'+it.duration+'</td>';tb.appendChild(tr);});}" +
+                "async function tick(){await Promise.all([loadDecks(),loadCards(),loadRecent()]);}" +
                 "function renderSideBtns(){const p=document.getElementById('sidePlant');const z=document.getElementById('sideZombie');if(side==='PLANT'){p.classList.add('active');z.classList.remove('active');}else{z.classList.add('active');p.classList.remove('active');}}" +
                 "document.getElementById('langBtn').addEventListener('click',async()=>{lang=(lang==='zh'?'en':'zh');labels();const bn=document.getElementById('banSel');if(bn){bn.options[0].text=(lang==='zh'?'禁选模式: 关':'Ban Mode: Off');bn.options[1].text=(lang==='zh'?'禁选模式: 开':'Ban Mode: On');}renderSideBtns();renderDecks();drawPie();await loadCards();});" +
                 "function applyTheme(){document.body.classList.toggle('dark',theme==='dark');const t=i18n[lang];document.getElementById('themeBtn').textContent=(theme==='dark'?t.themeDark:t.themeLight);}" +
@@ -424,7 +502,7 @@ final class DashboardServer {
                 "document.getElementById('extraSel').addEventListener('change',async(e)=>{extraPacket=e.target.value;hoverDeck='';await tick();});" +
                 "document.getElementById('bpSel').addEventListener('change',async(e)=>{balancePatch=e.target.value;hoverDeck='';await tick();});" +
                 "document.getElementById('modeSel').addEventListener('change',async(e)=>{mode=e.target.value;hoverDeck='';await tick();});" +
-                "(async()=>{const bp=document.getElementById('bpSel');if(bp){const bn=document.createElement('select');bn.id='banSel';bn.className='flt';bn.innerHTML='<option value=\"false\">Ban Mode: Off</option><option value=\"true\">Ban Mode: On</option>';bp.insertAdjacentElement('afterend',bn);bn.addEventListener('change',async(e)=>{banMode=e.target.value;hoverDeck='';applyBanColumns();await tick();});}applyTheme();labels();const bn2=document.getElementById('banSel');if(bn2){bn2.options[0].text=(lang==='zh'?'禁选模式: 关':'Ban Mode: Off');bn2.options[1].text=(lang==='zh'?'禁选模式: 开':'Ban Mode: On');}applyBanColumns();renderSideBtns();await loadNames();await tick();setInterval(tick,5000);})();" +
+                "(async()=>{const bp=document.getElementById('bpSel');if(bp){const bn=document.createElement('select');bn.id='banSel';bn.className='flt';bn.innerHTML='<option value=\"false\">Ban Mode: Off</option><option value=\"true\">Ban Mode: On</option>';bp.insertAdjacentElement('afterend',bn);bn.addEventListener('change',async(e)=>{banMode=e.target.value;hoverDeck='';applyBanColumns();await tick();});}applyTheme();labels();const bn2=document.getElementById('banSel');if(bn2){bn2.options[0].text=(lang==='zh'?'禁选模式: 关':'Ban Mode: Off');bn2.options[1].text=(lang==='zh'?'禁选模式: 开':'Ban Mode: On');}applyBanColumns();renderSideBtns();await loadNames();await tick();if(window.EventSource){const es=new EventSource('/api/stream');es.addEventListener('settle',()=>{tick();});es.onerror=()=>{};}})();" +
                 "</script></body></html>";
     }
 

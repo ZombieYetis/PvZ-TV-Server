@@ -9,6 +9,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.nio.charset.StandardCharsets;
 
 final class AnalyticsCollector {
     private static final int MAX_FINAL_PICKS_PER_SIDE = 8;
@@ -142,6 +143,12 @@ final class AnalyticsCollector {
                     case "zombie_use":
                         parseUsage(v, "ZOMBIE", m.usages);
                         break;
+                    case "plant_name":
+                        m.plantName = urlDecode(v);
+                        break;
+                    case "zombie_name":
+                        m.zombieName = urlDecode(v);
+                        break;
                     default:
                         break;
                 }
@@ -161,6 +168,26 @@ final class AnalyticsCollector {
             int count = Integer.parseInt(pair.substring(p + 1).trim());
             if (count > 0) out.add(new CardUsage(side, seed, count));
         }
+    }
+
+    private static String urlDecode(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        byte[] buf = new byte[raw.length()];
+        int w = 0;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c == '%' && i + 2 < raw.length()) {
+                int hi = Character.digit(raw.charAt(i + 1), 16);
+                int lo = Character.digit(raw.charAt(i + 2), 16);
+                if (hi >= 0 && lo >= 0) {
+                    buf[w++] = (byte) ((hi << 4) | lo);
+                    i += 2;
+                    continue;
+                }
+            }
+            buf[w++] = (byte) c;
+        }
+        return new String(buf, 0, w, StandardCharsets.UTF_8);
     }
 
     private static String normalizeSide(String raw) {
@@ -343,6 +370,8 @@ final class AnalyticsCollector {
         int targetLoss;
         int graveLoss;
         int sunflowerLoss;
+        String plantName = "";
+        String zombieName = "";
         final List<CardUsage> usages = new ArrayList<>();
     }
 

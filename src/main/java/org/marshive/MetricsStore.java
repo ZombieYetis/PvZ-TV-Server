@@ -59,8 +59,8 @@ final class MetricsStore {
 
     private static long insertMatchResult(String settleId, int roomId, String winner, int mainCounter, AnalyticsCollector.SettlementMeta meta) throws SQLException {
         int frames = Math.max(mainCounter, 0);
-        String sql = "INSERT INTO match_results(settle_id, room_id, winner, duration_text, bg, battle_type, game_mode, extra_packet, extended_seeds, ban_mode, balance_patch, mower_loss, target_loss, sunflower_loss, grave_loss, finished_at) " +
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))";
+        String sql = "INSERT INTO match_results(settle_id, room_id, winner, duration_text, bg, battle_type, game_mode, extra_packet, extended_seeds, ban_mode, balance_patch, mower_loss, target_loss, sunflower_loss, grave_loss, plant_name, zombie_name, finished_at) " +
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))";
         try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setString(1, settleId);
             ps.setInt(2, roomId);
@@ -77,6 +77,8 @@ final class MetricsStore {
             ps.setInt(13, meta == null ? 0 : meta.targetLoss);
             ps.setInt(14, meta == null ? 0 : meta.sunflowerLoss);
             ps.setInt(15, meta == null ? 0 : meta.graveLoss);
+            ps.setString(16, clipName(meta == null ? "" : meta.plantName));
+            ps.setString(17, clipName(meta == null ? "" : meta.zombieName));
             ps.executeUpdate();
             try (ResultSet rs = ps.getGeneratedKeys()) {
                 if (rs.next()) return rs.getLong(1);
@@ -200,6 +202,8 @@ final class MetricsStore {
                     "target_loss INTEGER NOT NULL DEFAULT 0," +
                     "sunflower_loss INTEGER NOT NULL DEFAULT 0," +
                     "grave_loss INTEGER NOT NULL DEFAULT 0," +
+                    "plant_name TEXT NOT NULL DEFAULT ''," +
+                    "zombie_name TEXT NOT NULL DEFAULT ''," +
                     "finished_at TEXT NOT NULL" +
                     ")");
             st.execute("CREATE TABLE IF NOT EXISTS card_stats (" +
@@ -230,94 +234,6 @@ final class MetricsStore {
                     "created_at TEXT NOT NULL," +
                     "FOREIGN KEY(match_id) REFERENCES match_results(id)" +
                     ")");
-            ensureColumn(st, "match_results", "bg", "TEXT NOT NULL DEFAULT 'UNKNOWN'");
-            ensureColumn(st, "match_results", "battle_type", "TEXT NOT NULL DEFAULT 'UNKNOWN'");
-            ensureColumn(st, "match_results", "game_mode", "TEXT NOT NULL DEFAULT 'NORMAL'");
-            ensureColumn(st, "match_results", "extra_packet", "TEXT NOT NULL DEFAULT 'false'");
-            ensureColumn(st, "match_results", "extended_seeds", "TEXT NOT NULL DEFAULT 'false'");
-            ensureColumn(st, "match_results", "ban_mode", "TEXT NOT NULL DEFAULT 'false'");
-            ensureColumn(st, "match_results", "balance_patch", "TEXT NOT NULL DEFAULT 'false'");
-            ensureColumn(st, "match_results", "mower_loss", "INTEGER NOT NULL DEFAULT 0");
-            ensureColumn(st, "match_results", "target_loss", "INTEGER NOT NULL DEFAULT 0");
-            ensureColumn(st, "match_results", "grave_loss", "INTEGER NOT NULL DEFAULT 0");
-            ensureColumn(st, "match_results", "sunflower_loss", "INTEGER NOT NULL DEFAULT 0");
-            ensureColumn(st, "match_card_events", "seed_name", "TEXT NOT NULL DEFAULT 'UnknownSeed'");
-            ensureColumn(st, "match_card_usage", "seed_name", "TEXT NOT NULL DEFAULT 'UnknownSeed'");
-            // Migrate legacy mode/addon column values into new concise columns.
-            try {
-                st.execute("UPDATE match_results SET game_mode = CASE " +
-                        "WHEN game_mode IS NULL OR game_mode = '' OR game_mode = 'NORMAL' THEN " +
-                        "CASE " +
-                        "WHEN entertainment_mode IN ('SHUFFLE','NORMAL') THEN entertainment_mode " +
-                        "WHEN shuffle_mode = '1' THEN 'SHUFFLE' " +
-                        "WHEN shuffle_mode = '0' THEN 'NORMAL' " +
-                        "WHEN shuffle_mode IN ('SHUFFLE','NORMAL') THEN shuffle_mode " +
-                        "ELSE game_mode END " +
-                        "ELSE game_mode END");
-            } catch (SQLException ignored) {
-            }
-            migrateBoolText(st, "extra_packet", "extra_packets");
-            migrateBoolText(st, "extra_packet", "addon_extra_packets");
-            migrateBoolText(st, "extended_seeds", "extend_seeds");
-            migrateBoolText(st, "extended_seeds", "extra_seeds");
-            migrateBoolText(st, "extended_seeds", "addon_extra_seeds");
-            migrateBoolText(st, "ban_mode", "addon_ban_mode");
-            migrateBoolText(st, "balance_patch", "addon_balance_patch");
-            try {
-                st.execute("UPDATE match_results SET battle_type = CASE battle_type " +
-                        "WHEN 'QP' THEN 'QUICK' " +
-                        "WHEN 'CB' THEN 'CUSTOM' " +
-                        "WHEN 'RB' THEN 'RANDOM' " +
-                        "WHEN '9' THEN 'QUICK' " +
-                        "WHEN '10' THEN 'CUSTOM' " +
-                        "WHEN '11' THEN 'RANDOM' " +
-                        "ELSE battle_type END");
-            } catch (SQLException ignored) {
-            }
-            try {
-                st.execute("UPDATE match_results SET winner = CASE winner " +
-                        "WHEN 'PLANT_WIN' THEN 'PLANT' " +
-                        "WHEN 'ZOMBIE_WIN' THEN 'ZOMBIE' " +
-                        "ELSE winner END");
-            } catch (SQLException ignored) {
-            }
-            backfillSeedNames();
-        }
-    }
-
-    private static void backfillSeedNames() {
-        try (PreparedStatement ps = conn.prepareStatement(
-                "UPDATE match_card_events SET seed_name = ? WHERE seed_type = ? AND (seed_name IS NULL OR seed_name = '' OR seed_name = 'UnknownSeed')")) {
-            for (int seed = 0; seed <= 120; seed++) {
-                ps.setString(1, SeedTypeNames.nameOf(seed));
-                ps.setInt(2, seed);
-                ps.addBatch();
-            }
-            ps.executeBatch();
-        } catch (SQLException ignored) {
-        }
-        try (PreparedStatement ps = conn.prepareStatement(
-                "UPDATE match_card_usage SET seed_name = ? WHERE seed_type = ? AND (seed_name IS NULL OR seed_name = '' OR seed_name = 'UnknownSeed')")) {
-            for (int seed = 0; seed <= 120; seed++) {
-                ps.setString(1, SeedTypeNames.nameOf(seed));
-                ps.setInt(2, seed);
-                ps.addBatch();
-            }
-            ps.executeBatch();
-        } catch (SQLException ignored) {
-        }
-    }
-
-    private static void migrateBoolText(Statement st, String newCol, String oldCol) {
-        try {
-            st.execute("UPDATE match_results SET " + newCol + " = CASE " +
-                    "WHEN " + newCol + " IS NULL OR " + newCol + " = '' OR " + newCol + " = 'false' THEN " +
-                    "CASE " + oldCol + " " +
-                    "WHEN '1' THEN 'true' WHEN '0' THEN 'false' " +
-                    "WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' " +
-                    "ELSE " + newCol + " END " +
-                    "ELSE " + newCol + " END");
-        } catch (SQLException ignored) {
         }
     }
 
@@ -355,13 +271,6 @@ final class MetricsStore {
         }
     }
 
-    private static void ensureColumn(Statement st, String table, String col, String ddl) {
-        try {
-            st.execute("ALTER TABLE " + table + " ADD COLUMN " + col + " " + ddl);
-        } catch (SQLException ignored) {
-        }
-    }
-
     private static boolean isDuplicateSettleId(SQLException e) {
         String msg = e.getMessage();
         if (msg == null) return false;
@@ -374,5 +283,12 @@ final class MetricsStore {
         int minutes = totalSeconds / 60;
         int seconds = totalSeconds % 60;
         return String.format("%02d:%02d", minutes, seconds);
+    }
+
+    private static String clipName(String raw) {
+        if (raw == null) return "";
+        String v = raw.trim();
+        if (v.length() <= 64) return v;
+        return v.substring(0, 64);
     }
 }

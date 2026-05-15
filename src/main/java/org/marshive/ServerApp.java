@@ -27,6 +27,10 @@ public class ServerApp {
     public static void main(String[] args) throws Exception {
         int basePort = DEFAULT_BASE_PORT;
         int shardCount = DEFAULT_SHARD_COUNT;
+        boolean dashboardEnabled = true;
+        String replicateHost = "";
+        int replicatePort = 0;
+        int replicateBatch = 10;
 
         for (String a : args) {
             if (a == null) continue;
@@ -35,6 +39,17 @@ public class ServerApp {
                 basePort = parseIntSafe(a.substring("--base=".length()), basePort);
             } else if (a.startsWith("--shards=")) {
                 shardCount = parseIntSafe(a.substring("--shards=".length()), shardCount);
+            } else if (a.startsWith("--dashboard=")) {
+                dashboardEnabled = parseBoolSafe(a.substring("--dashboard=".length()), true);
+            } else if (a.startsWith("--replicate_to=")) {
+                String target = a.substring("--replicate_to=".length()).trim();
+                int p = target.lastIndexOf(':');
+                if (p > 0 && p + 1 < target.length()) {
+                    replicateHost = target.substring(0, p).trim();
+                    replicatePort = parseIntSafe(target.substring(p + 1).trim(), 0);
+                }
+            } else if (a.startsWith("--replicate_batch=")) {
+                replicateBatch = parseIntSafe(a.substring("--replicate_batch=".length()), replicateBatch);
             }
         }
         if (args.length >= 1 && args[0] != null && !args[0].trim().startsWith("--")) {
@@ -103,8 +118,13 @@ public class ServerApp {
             startProbeThread(probePort, 1);
             startProbeThread(probePort2, 2);
         }
+        SettlementReplicator.configure(replicateHost, replicatePort, replicateBatch);
         startMetricsThread(metricsPort);
-        DashboardServer.start(dashboardPort);
+        if (dashboardEnabled) {
+            DashboardServer.start(dashboardPort);
+        } else {
+            System.out.println("[DASHBOARD] disabled");
+        }
 
         long lastRoomCleanAt = System.currentTimeMillis();
         while (true) {
@@ -153,6 +173,7 @@ public class ServerApp {
                     h.close();
                 }
             }
+            SettlementReplicator.onTick(now);
 
             if (now - lastRoomCleanAt >= ROOM_CLEAN_INTERVAL_MS) {
                 int removedTotal = 0;
@@ -203,7 +224,14 @@ public class ServerApp {
                         String req = reader.readLine();
                         String resp;
                         if (req != null && req.startsWith("SETTLE|")) {
-                            resp = AnalyticsCollector.ingestSettlement(req) + "\n";
+                            String ret = AnalyticsCollector.ingestSettlement(req);
+                            resp = ret + "\n";
+                            if ("OK".equals(ret) || "OK_DUP".equals(ret)) {
+                                DashboardServer.notifyDataUpdated();
+                            }
+                            if (SettlementReplicator.isEnabled() && ("OK".equals(ret) || "OK_DUP".equals(ret))) {
+                                SettlementReplicator.onAcceptedSettlementLine(req);
+                            }
                         } else {
                             resp = AnalyticsCollector.snapshotSummary() + "\n";
                         }
@@ -228,6 +256,14 @@ public class ServerApp {
         } catch (Exception ignored) {
             return fallback;
         }
+    }
+
+    private static boolean parseBoolSafe(String s, boolean fallback) {
+        if (s == null) return fallback;
+        String v = s.trim().toLowerCase();
+        if ("1".equals(v) || "true".equals(v) || "yes".equals(v) || "on".equals(v)) return true;
+        if ("0".equals(v) || "false".equals(v) || "no".equals(v) || "off".equals(v)) return false;
+        return fallback;
     }
 
     private record ShardBinding(int shardId, int probePort, int probePort2) {
