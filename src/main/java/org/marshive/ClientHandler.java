@@ -432,7 +432,10 @@ public class ClientHandler {
         if (!allow) {
             for (ClientHandler s : currentRoom.snapshotSpectators()) {
                 if (s == null) continue;
-                try { s.sendFrame(RespType.ROOM_EXITED.code, null); } catch (IOException ignored) {}
+                try {
+                    s.sendFrame(RespType.ROOM_EXITED.code, null);
+                } catch (IOException ignored) {
+                }
                 s.currentRoom = null;
                 s.isHost = false;
                 s.isSpectator = false;
@@ -913,10 +916,16 @@ public class ClientHandler {
         ClientHandler host = room.getHost();
         ClientHandler guest = room.getGuest();
         if (host != null && !host.closed) {
-            try { host.sendFrame(RespType.SPECTATE_STATE.code, payload); } catch (IOException ignored) {}
+            try {
+                host.sendFrame(RespType.SPECTATE_STATE.code, payload);
+            } catch (IOException ignored) {
+            }
         }
         if (guest != null && !guest.closed) {
-            try { guest.sendFrame(RespType.SPECTATE_STATE.code, payload); } catch (IOException ignored) {}
+            try {
+                guest.sendFrame(RespType.SPECTATE_STATE.code, payload);
+            } catch (IOException ignored) {
+            }
         }
     }
 
