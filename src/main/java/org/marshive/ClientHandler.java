@@ -1099,6 +1099,9 @@ public class ClientHandler {
         ArrayList<Room> list = new ArrayList<>();
         for (Room r : rm.allRooms()) {
             if (r.isGaming()) continue;
+            boolean hasGuestSlot = !r.isFull();
+            boolean hasSpectateSlot = r.isSpectateAllowed() && r.spectatorCount() < Room.MAX_SPECTATORS;
+            if (!hasGuestSlot && !hasSpectateSlot) continue;
             if (list.size() >= 255) break;
             list.add(r);
         }
