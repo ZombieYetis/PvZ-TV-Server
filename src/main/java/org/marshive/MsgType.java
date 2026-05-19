@@ -20,7 +20,8 @@ public enum MsgType {
     KICK_GUEST((byte) 0x0C),
     ASK_START((byte) 0x0D),
     SET_SPECTATE((byte) 0x0E),
-    JOIN_SPECTATE((byte) 0x0F);
+    JOIN_SPECTATE((byte) 0x0F),
+    SWITCH_ROLE((byte) 0x10);
 
     public final byte code;
 

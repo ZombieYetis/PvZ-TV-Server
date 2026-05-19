@@ -294,6 +294,12 @@ public class ClientHandler {
                 handleJoinSpectate(roomId, clientVersion, watcherName);
                 return true;
             }
+            case SWITCH_ROLE: {
+                if (readBuf.remaining() < 1) return false;
+                int toSpectator = u8(readBuf.get());
+                handleSwitchRole(toSpectator != 0);
+                return true;
+            }
             case LEAVE:
                 throw new IOException("User left (disconnect)");
             default:
@@ -568,6 +574,66 @@ public class ClientHandler {
         currentRoom = null;
         isHost = false;
         sendFrame(RespType.ROOM_EXITED.code, null);
+    }
+
+    private void handleSwitchRole(boolean toSpectator) throws IOException {
+        Room r = currentRoom;
+        if (r == null || r.isGaming() || isHost) {
+            sendError(ERR_BAD_REQ);
+            return;
+        }
+        if (toSpectator) {
+            if (!isCurrentRoomGuest()) {
+                sendError(ERR_BAD_REQ);
+                return;
+            }
+            if (!r.isSpectateAllowed()) {
+                sendError(ERR_NOT_ALLOWED);
+                return;
+            }
+            if (r.spectatorCount() >= Room.MAX_SPECTATORS) {
+                sendError(ERR_FULL);
+                return;
+            }
+            r.setGuest(null);
+            isSpectator = true;
+            r.addSpectator(this);
+            sendJoinResult(true, r.getId(), r.getProtocolVersion(), r.getName(), (byte) 1);
+            notifyHostGuestLeft(r);
+            sendRoomProbeState(r);
+            broadcastSpectateState(r);
+            broadcastSpectatorList(r);
+            return;
+        }
+
+        if (!isSpectator) {
+            sendError(ERR_BAD_REQ);
+            return;
+        }
+        if (r.isFull()) {
+            sendError(ERR_FULL);
+            return;
+        }
+        r.removeSpectator(this);
+        r.setGuest(this);
+        isSpectator = false;
+        sendJoinResult(true, r.getId(), r.getProtocolVersion(), r.getName(), (byte) 0);
+
+        ClientHandler host = r.getHost();
+        if (host != null) {
+            byte[] guestNameBytes = playerName.getBytes(StandardCharsets.UTF_8);
+            int guestNameLen = Math.min(255, guestNameBytes.length);
+            byte[] p = new byte[4 + 1 + guestNameLen];
+            writeIntTo(p, 0, r.getId());
+            p[4] = (byte) guestNameLen;
+            if (guestNameLen > 0) {
+                System.arraycopy(guestNameBytes, 0, p, 5, guestNameLen);
+            }
+            host.sendFrame(RespType.GUEST_JOINED.code, p);
+        }
+        sendRoomProbeState(r);
+        broadcastSpectateState(r);
+        broadcastSpectatorList(r);
     }
 
     private void handleKickGuest() throws IOException {
