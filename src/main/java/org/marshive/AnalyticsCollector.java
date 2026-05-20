@@ -70,9 +70,10 @@ final class AnalyticsCollector {
                     String[] f = t.split(",", 4);
                     if (f.length < 4) continue;
                     int seq = Integer.parseInt(f[0].trim());
-                    String side = normalizeSide(f[1].trim());
                     String eventType = normalizeEventType(f[2].trim());
                     int seedType = Integer.parseInt(f[3].trim());
+                    String side = inferSide(seedType);
+                    if (side == null) side = normalizeSide(f[1].trim());
                     if (side == null || eventType == null) continue;
                     events.add(new MatchEvent(seq, side, eventType, seedType));
                 }
@@ -194,6 +195,12 @@ final class AnalyticsCollector {
         String v = raw.toUpperCase(Locale.ROOT);
         if ("Z".equals(v) || "ZOMBIE".equals(v)) return "ZOMBIE";
         if ("P".equals(v) || "PLANT".equals(v)) return "PLANT";
+        return null;
+    }
+
+    private static String inferSide(int seedType) {
+        if (seedType >= 61) return "ZOMBIE";
+        if (seedType >= 0) return "PLANT";
         return null;
     }
 

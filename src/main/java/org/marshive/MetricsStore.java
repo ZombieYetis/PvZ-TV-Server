@@ -34,6 +34,7 @@ final class MetricsStore {
                 conn.setAutoCommit(false);
                 long matchId = insertMatchResult(settleId, roomId, plantWin ? "PLANT" : "ZOMBIE", mainCounter, meta);
                 insertMatchEvents(matchId, events);
+                insertMatchDecks(matchId, events, meta);
                 insertCardUsage(matchId, meta == null ? null : meta.usages);
                 upsertCardStatsFromEvents(events, plantWin);
                 conn.commit();
@@ -97,6 +98,26 @@ final class MetricsStore {
                 ps.setInt(3, u.seedType());
                 ps.setString(4, SeedTypeNames.nameOf(u.seedType()));
                 ps.setInt(5, u.useCount());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    private static void insertMatchDecks(long matchId, List<AnalyticsCollector.MatchEvent> events, AnalyticsCollector.SettlementMeta meta) throws SQLException {
+        DeckBuild deckBuild = buildDecksFromEvents(events, meta);
+        String sql = "INSERT INTO match_decks(match_id, side, deck_ids, created_at) VALUES(?, ?, ?, datetime('now'))";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (deckBuild.plantDeck.size() == deckBuild.slotCount) {
+                ps.setLong(1, matchId);
+                ps.setString(2, "PLANT");
+                ps.setString(3, normalizeDeckIds(deckBuild.plantDeck));
+                ps.addBatch();
+            }
+            if (deckBuild.zombieDeck.size() == deckBuild.slotCount) {
+                ps.setLong(1, matchId);
+                ps.setString(2, "ZOMBIE");
+                ps.setString(3, normalizeDeckIds(deckBuild.zombieDeck));
                 ps.addBatch();
             }
             ps.executeBatch();
@@ -175,6 +196,7 @@ final class MetricsStore {
             }
             conn = DriverManager.getConnection(DB_URL);
             createSchema(conn);
+            repairSideBySeedType(conn);
             initialized = true;
             return true;
         } catch (SQLException e) {
@@ -234,6 +256,138 @@ final class MetricsStore {
                     "created_at TEXT NOT NULL," +
                     "FOREIGN KEY(match_id) REFERENCES match_results(id)" +
                     ")");
+            st.execute("CREATE TABLE IF NOT EXISTS match_decks (" +
+                    "match_id INTEGER NOT NULL," +
+                    "side TEXT NOT NULL," +
+                    "deck_ids TEXT NOT NULL DEFAULT ''," +
+                    "created_at TEXT NOT NULL," +
+                    "PRIMARY KEY(match_id, side)," +
+                    "FOREIGN KEY(match_id) REFERENCES match_results(id)" +
+                    ")");
+        }
+    }
+
+    private static void repairSideBySeedType(Connection c) throws SQLException {
+        int fixedEvents = 0;
+        int fixedUsage = 0;
+        try (PreparedStatement ps = c.prepareStatement(
+                "UPDATE match_card_events " +
+                        "SET side = CASE WHEN seed_type >= 61 THEN 'ZOMBIE' ELSE 'PLANT' END " +
+                        "WHERE side <> CASE WHEN seed_type >= 61 THEN 'ZOMBIE' ELSE 'PLANT' END")) {
+            fixedEvents = ps.executeUpdate();
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "UPDATE match_card_usage " +
+                        "SET side = CASE WHEN seed_type >= 61 THEN 'ZOMBIE' ELSE 'PLANT' END " +
+                        "WHERE side <> CASE WHEN seed_type >= 61 THEN 'ZOMBIE' ELSE 'PLANT' END")) {
+            fixedUsage = ps.executeUpdate();
+        }
+        if (fixedEvents > 0 || fixedUsage > 0) {
+            System.out.println("[METRICS_DB] repaired side by seed_type: events=" + fixedEvents + ", usage=" + fixedUsage);
+        }
+        rebuildMatchDecks(c);
+    }
+
+    private static void rebuildMatchDecks(Connection c) throws SQLException {
+        c.createStatement().execute("DELETE FROM match_decks");
+        final String sql =
+                "SELECT r.id AS match_id, r.extra_packet, e.seq, e.id AS event_id, e.seed_type " +
+                        "FROM match_results r " +
+                        "LEFT JOIN match_card_events e ON e.match_id=r.id AND e.event_type='PICK' " +
+                        "ORDER BY r.id ASC, e.seq ASC, e.id ASC";
+        try (PreparedStatement ps = c.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            long currentMatchId = -1L;
+            int slotCount = 5;
+            java.util.List<AnalyticsCollector.MatchEvent> events = new java.util.ArrayList<>();
+            while (rs.next()) {
+                long matchId = rs.getLong("match_id");
+                if (currentMatchId != -1L && currentMatchId != matchId) {
+                    insertRebuiltDecks(c, currentMatchId, events, slotCount);
+                    events.clear();
+                }
+                if (currentMatchId != matchId) {
+                    currentMatchId = matchId;
+                    slotCount = "true".equalsIgnoreCase(rs.getString("extra_packet")) ? 6 : 5;
+                }
+                int seedType = rs.getInt("seed_type");
+                if (rs.wasNull()) {
+                    continue;
+                }
+                String side = seedType >= 61 ? "ZOMBIE" : "PLANT";
+                int seq = rs.getInt("seq");
+                events.add(new AnalyticsCollector.MatchEvent(seq, side, "PICK", seedType));
+            }
+            if (currentMatchId != -1L) {
+                insertRebuiltDecks(c, currentMatchId, events, slotCount);
+            }
+        }
+    }
+
+    private static void insertRebuiltDecks(Connection c, long matchId, List<AnalyticsCollector.MatchEvent> events, int slotCount) throws SQLException {
+        DeckBuild deckBuild = buildDecksFromEvents(events, slotCount);
+        String sql = "INSERT INTO match_decks(match_id, side, deck_ids, created_at) VALUES(?, ?, ?, datetime('now'))";
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
+            if (deckBuild.plantDeck.size() == deckBuild.slotCount) {
+                ps.setLong(1, matchId);
+                ps.setString(2, "PLANT");
+                ps.setString(3, normalizeDeckIds(deckBuild.plantDeck));
+                ps.addBatch();
+            }
+            if (deckBuild.zombieDeck.size() == deckBuild.slotCount) {
+                ps.setLong(1, matchId);
+                ps.setString(2, "ZOMBIE");
+                ps.setString(3, normalizeDeckIds(deckBuild.zombieDeck));
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    private static DeckBuild buildDecksFromEvents(List<AnalyticsCollector.MatchEvent> events, AnalyticsCollector.SettlementMeta meta) {
+        int slotCount = (meta != null && meta.addonExtraPackets) ? 6 : 5;
+        return buildDecksFromEvents(events, slotCount);
+    }
+
+    private static DeckBuild buildDecksFromEvents(List<AnalyticsCollector.MatchEvent> events, int slotCount) {
+        java.util.List<AnalyticsCollector.MatchEvent> ordered = new java.util.ArrayList<>();
+        if (events != null) {
+            ordered.addAll(events);
+        }
+        ordered.sort(java.util.Comparator.comparingInt(AnalyticsCollector.MatchEvent::seq));
+        java.util.LinkedHashSet<Integer> plantDeck = new java.util.LinkedHashSet<>();
+        java.util.LinkedHashSet<Integer> zombieDeck = new java.util.LinkedHashSet<>();
+        for (AnalyticsCollector.MatchEvent event : ordered) {
+            if (!"PICK".equals(event.eventType())) continue;
+            if ("PLANT".equals(event.side()) && plantDeck.size() < slotCount) {
+                plantDeck.add(event.seedType());
+            } else if ("ZOMBIE".equals(event.side()) && zombieDeck.size() < slotCount) {
+                zombieDeck.add(event.seedType());
+            }
+        }
+        return new DeckBuild(plantDeck, zombieDeck, slotCount);
+    }
+
+    private static String normalizeDeckIds(Set<Integer> seeds) {
+        java.util.List<Integer> sorted = new java.util.ArrayList<>(seeds);
+        java.util.Collections.sort(sorted);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < sorted.size(); i++) {
+            if (i > 0) sb.append('|');
+            sb.append(sorted.get(i));
+        }
+        return sb.toString();
+    }
+
+    private static final class DeckBuild {
+        private final Set<Integer> plantDeck;
+        private final Set<Integer> zombieDeck;
+        private final int slotCount;
+
+        private DeckBuild(Set<Integer> plantDeck, Set<Integer> zombieDeck, int slotCount) {
+            this.plantDeck = plantDeck;
+            this.zombieDeck = zombieDeck;
+            this.slotCount = slotCount;
         }
     }
 
