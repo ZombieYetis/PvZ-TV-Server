@@ -58,8 +58,8 @@ java -jar PvZ-TV-Server.jar --base=26667 --replicate_to=IP:PORT
 
 ## 参数说明
 
-| 参数               | 说明 | 示例 |
-|------------------|---|---|
-| `--base`         | 服务器监听端口 | `--base=26667` |
-| `--dashboard`    | 是否开启 Dashboard 数据统计页面 | `--dashboard=true` |
-| `--replicate_to` | 将对战数据转发到指定地址 | `replicate_to=127.0.0.1:3000` |
+| 参数               | 说明 | 示例                              |
+|------------------|---|---------------------------------|
+| `--base`         | 服务器监听端口 | `--base=26667`                  |
+| `--dashboard`    | 是否开启 Dashboard 数据统计页面 | `--dashboard=true`              |
+| `--replicate_to` | 将对战数据转发到指定地址 | `--replicate_to=127.0.0.1:3000` |
