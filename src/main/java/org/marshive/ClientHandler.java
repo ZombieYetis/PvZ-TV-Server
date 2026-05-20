@@ -379,16 +379,7 @@ public class ClientHandler {
 
         sendJoinResult(true, roomId, r.getProtocolVersion(), r.getName(), (byte) 0);
 
-        ClientHandler host = currentRoom.getHost();
-        if (host != null) {
-            byte[] guestNameBytes = guestName.getBytes(StandardCharsets.UTF_8);
-            int guestNameLen = Math.min(255, guestNameBytes.length);
-            byte[] p = new byte[4 + 1 + guestNameLen];
-            writeIntTo(p, 0, roomId);
-            p[4] = (byte) guestNameLen;
-            System.arraycopy(guestNameBytes, 0, p, 5, guestNameLen);
-            host.sendFrame(RespType.GUEST_JOINED.code, p);
-        }
+        notifyRoomGuestJoined(currentRoom, guestName);
         logGuestFlow("JOINED", currentRoom, this);
         broadcastSpectateState(currentRoom);
         sendRoomProbeState(currentRoom);
@@ -563,12 +554,7 @@ public class ClientHandler {
             sendError(ERR_BAD_REQ);
             return;
         }
-        ClientHandler host = r.getHost();
-        if (host != null) {
-            byte[] p = new byte[4];
-            writeIntTo(p, 0, roomId);
-            host.sendFrame(RespType.GUEST_LEFT.code, p);
-        }
+        notifyHostGuestLeft(r);
         logGuestFlow("LEFT", r, this);
         sendRoomProbeState(r);
         currentRoom = null;
@@ -619,18 +605,7 @@ public class ClientHandler {
         isSpectator = false;
         sendJoinResult(true, r.getId(), r.getProtocolVersion(), r.getName(), (byte) 0);
 
-        ClientHandler host = r.getHost();
-        if (host != null) {
-            byte[] guestNameBytes = playerName.getBytes(StandardCharsets.UTF_8);
-            int guestNameLen = Math.min(255, guestNameBytes.length);
-            byte[] p = new byte[4 + 1 + guestNameLen];
-            writeIntTo(p, 0, r.getId());
-            p[4] = (byte) guestNameLen;
-            if (guestNameLen > 0) {
-                System.arraycopy(guestNameBytes, 0, p, 5, guestNameLen);
-            }
-            host.sendFrame(RespType.GUEST_JOINED.code, p);
-        }
+        notifyRoomGuestJoined(r, playerName);
         sendRoomProbeState(r);
         broadcastSpectateState(r);
         broadcastSpectatorList(r);
@@ -1216,13 +1191,48 @@ public class ClientHandler {
     }
 
     private void notifyHostGuestLeft(Room room) {
-        ClientHandler host = room.getHost();
-        if (host == null) return;
+        if (room == null) return;
         byte[] p = new byte[4];
         writeIntTo(p, 0, room.getId());
+        ClientHandler host = room.getHost();
+        if (host != null) {
+            try {
+                host.sendFrame(RespType.GUEST_LEFT.code, p);
+            } catch (IOException ignored) {
+            }
+        }
+        for (ClientHandler s : room.snapshotSpectators()) {
+            if (s == null || s.closed) continue;
+            try {
+                s.sendFrame(RespType.GUEST_LEFT.code, p);
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    private void notifyRoomGuestJoined(Room room, String guestName) {
+        if (room == null) return;
+        byte[] guestNameBytes = guestName == null ? new byte[0] : guestName.getBytes(StandardCharsets.UTF_8);
+        int guestNameLen = Math.min(255, guestNameBytes.length);
+        byte[] p = new byte[4 + 1 + guestNameLen];
+        writeIntTo(p, 0, room.getId());
+        p[4] = (byte) guestNameLen;
+        if (guestNameLen > 0) {
+            System.arraycopy(guestNameBytes, 0, p, 5, guestNameLen);
+        }
+        ClientHandler host = room.getHost();
         try {
-            host.sendFrame(RespType.GUEST_LEFT.code, p);
+            if (host != null) {
+                host.sendFrame(RespType.GUEST_JOINED.code, p);
+            }
         } catch (IOException ignored) {
+        }
+        for (ClientHandler s : room.snapshotSpectators()) {
+            if (s == null || s.closed) continue;
+            try {
+                s.sendFrame(RespType.GUEST_JOINED.code, p);
+            } catch (IOException ignored) {
+            }
         }
     }
 

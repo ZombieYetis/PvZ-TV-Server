@@ -27,7 +27,7 @@ public class ServerApp {
     public static void main(String[] args) throws Exception {
         int basePort = DEFAULT_BASE_PORT;
         int shardCount = DEFAULT_SHARD_COUNT;
-        boolean dashboardEnabled = true;
+        boolean dashboardEnabled = false;
         String replicateHost = "";
         int replicatePort = 0;
         int replicateBatch = 10;
@@ -40,7 +40,7 @@ public class ServerApp {
             } else if (a.startsWith("--shards=")) {
                 shardCount = parseIntSafe(a.substring("--shards=".length()), shardCount);
             } else if (a.startsWith("--dashboard=")) {
-                dashboardEnabled = parseBoolSafe(a.substring("--dashboard=".length()), true);
+                dashboardEnabled = parseBoolSafe(a.substring("--dashboard=".length()), false);
             } else if (a.startsWith("--replicate_to=")) {
                 String target = a.substring("--replicate_to=".length()).trim();
                 int p = target.lastIndexOf(':');
