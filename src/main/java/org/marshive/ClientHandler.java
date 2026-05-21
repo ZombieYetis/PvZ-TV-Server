@@ -3,6 +3,7 @@ package org.marshive;
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.Socket;
+import jdk.net.ExtendedSocketOptions;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
@@ -69,7 +70,28 @@ public class ClientHandler {
         ch.configureBlocking(false);
         Socket s = ch.socket();
         s.setTcpNoDelay(true);
+        configureKeepAlive(s);
         touchActivity();
+    }
+
+    private static void configureKeepAlive(Socket socket) {
+        try {
+            socket.setKeepAlive(true);
+
+            if (socket.supportedOptions().contains(ExtendedSocketOptions.TCP_KEEPIDLE)) {
+                socket.setOption(ExtendedSocketOptions.TCP_KEEPIDLE, 10);
+            }
+
+            if (socket.supportedOptions().contains(ExtendedSocketOptions.TCP_KEEPINTERVAL)) {
+                socket.setOption(ExtendedSocketOptions.TCP_KEEPINTERVAL, 3);
+            }
+
+            if (socket.supportedOptions().contains(ExtendedSocketOptions.TCP_KEEPCOUNT)) {
+                socket.setOption(ExtendedSocketOptions.TCP_KEEPCOUNT, 3);
+            }
+        } catch (Exception e) {
+            System.out.println("[NET] keepalive tuning not applied: " + e.getMessage());
+        }
     }
 
     static void acceptP2PProbe(int token, Socket probeSocket, int probeIndex) {
