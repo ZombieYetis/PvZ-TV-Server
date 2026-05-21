@@ -229,7 +229,8 @@ final class AnalyticsCollector {
                 stats(e.seedType).disabled.incrementAndGet();
             } else if ("PICK".equals(e.eventType)) {
                 if ("PLANT".equals(e.side) && plantPicks.size() < MAX_FINAL_PICKS_PER_SIDE) plantPicks.add(e.seedType);
-                if ("ZOMBIE".equals(e.side) && zombiePicks.size() < MAX_FINAL_PICKS_PER_SIDE) zombiePicks.add(e.seedType);
+                if ("ZOMBIE".equals(e.side) && zombiePicks.size() < MAX_FINAL_PICKS_PER_SIDE)
+                    zombiePicks.add(e.seedType);
             }
         }
         for (int seed : plantPicks) {

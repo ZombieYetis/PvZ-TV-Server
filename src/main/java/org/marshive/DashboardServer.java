@@ -226,7 +226,8 @@ final class DashboardServer {
             if (id == SUNFLOWER_SEED || id == GRAVESTONE_SEED) continue;
             candidates.add(id);
         }
-        if (candidates.isEmpty()) return new CoreNames(coreNameForSide(deckIds, true, side), coreNameForSide(deckIds, false, side));
+        if (candidates.isEmpty())
+            return new CoreNames(coreNameForSide(deckIds, true, side), coreNameForSide(deckIds, false, side));
         final String sql =
                 "WITH decks AS (" +
                         "  SELECT d.match_id, d.side, d.deck_ids " +
@@ -469,6 +470,7 @@ final class DashboardServer {
                 "function sideText(s){return s==='PLANT'?i18n[lang].plant:i18n[lang].zombie}" +
                 "function winnerText(w){return w==='PLANT'?i18n[lang].winnerPlant:(w==='ZOMBIE'?i18n[lang].winnerZombie:w)}" +
                 "function cardName(id,en,zh){const n=names[id];if(n){return lang==='zh'?(n.zh||n.en):n.en;}return lang==='zh'?(zh||en||i18n[lang].unknown):(en||i18n[lang].unknown)}" +
+                "function fmtTime(s){if(!s)return '-';const iso=s.includes('T')?s:(s.replace(' ','T')+'Z');const d=new Date(iso);if(Number.isNaN(d.getTime()))return s;return d.toLocaleString(lang==='zh'?'zh-CN':'en-US',{hour12:false});}" +
                 "function labels(){const t=i18n[lang];document.getElementById('topTitle').textContent=t.title;document.getElementById('deckTitle').textContent=sideText(side)+t.sideSuffix+' '+t.deckTitle;document.getElementById('cardTitle').textContent=t.cardTitle;document.getElementById('recentTitle').textContent=t.recentTitle;document.getElementById('recentThTime').textContent=t.time;document.getElementById('recentThPlant').textContent=t.plant;document.getElementById('recentThZombie').textContent=t.zombie;document.getElementById('recentThWinner').textContent=t.winner;document.getElementById('recentThDuration').textContent=t.duration;document.getElementById('subTitle').textContent=t.sub;document.getElementById('thCard').textContent=t.card;document.getElementById('thPick').textContent=t.pick;document.getElementById('thBan').textContent=t.ban;document.getElementById('thWin').textContent=t.win;document.getElementById('thWr').textContent=t.wr;document.getElementById('thPr').textContent=t.pr;document.getElementById('thBr').textContent=t.br;document.getElementById('thTr').textContent=t.tr;document.getElementById('thTr').title=t.trTip;const e=document.getElementById('extraSel');e.options[0].text=t.extraOff;e.options[1].text=t.extraOn;const b=document.getElementById('bpSel');b.options[0].text=t.bpOn;b.options[1].text=t.bpOff;const m=document.getElementById('modeSel');m.options[0].text=t.modeDay;m.options[1].text=t.modeNight;m.options[2].text=t.modePool;m.options[3].text=t.modeFog;m.options[4].text=t.modeRoof;document.getElementById('sidePlant').textContent=t.plant;document.getElementById('sideZombie').textContent=t.zombie;document.getElementById('langBtn').textContent=(lang==='zh'?'中文 / EN':'EN / 中文');document.getElementById('themeBtn').textContent=(theme==='dark'?t.themeDark:t.themeLight);applyBanColumns();}" +
                 "function applyBanColumns(){const on=(banMode==='true');['thBan','thBr','thTr'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display=on?'':'none';});}" +
                 "async function loadNames(){const r=await fetch('/api/seed-names');const j=await r.json();names={};(j.items||[]).forEach(it=>names[it.seed_type]={en:it.en,zh:it.zh});}" +
@@ -480,7 +482,7 @@ final class DashboardServer {
                 "function qs(){return 'side='+encodeURIComponent(side)+'&extra_packet='+encodeURIComponent(extraPacket)+'&balance_patch='+encodeURIComponent(balancePatch)+'&ban_mode='+encodeURIComponent(banMode)+'&mode='+encodeURIComponent(mode)}" +
                 "async function loadDecks(v){let nextDecks=[];let nextTotal=0;try{const r=await fetch('/api/top-decks?'+qs(),{cache:'no-store'});const j=await r.json();nextDecks=j.items||[];nextTotal=(j.total_plays||0);}catch(_){}if(v!==reqVer)return;decks=nextDecks;totalPlays=nextTotal;decksLoading=false;if(hoverDeck && !decks.some(d=>d.deck_ids===hoverDeck))hoverDeck='';renderDecks();drawPie();}" +
                 "async function loadCards(v){let items=[];try{const r=await fetch('/api/card-stats?'+qs(),{cache:'no-store'});const j=await r.json();items=j.items||[];}catch(_){}if(v!==reqVer)return;const tb=document.querySelector('#cards tbody');tb.innerHTML='';const on=(banMode==='true');items.forEach(it=>{const tr=document.createElement('tr');tr.innerHTML=on?('<td>'+cardName(it.seed_type,it.seed_en,it.seed_zh)+'</td><td>'+it.picked+'</td><td>'+it.banned+'</td><td>'+it.won+'</td><td>'+pct(it.win_rate)+'</td><td>'+pct(it.pick_rate)+'</td><td>'+pct(it.ban_rate)+'</td><td>'+pct(it.target_rate)+'</td>'):('<td>'+cardName(it.seed_type,it.seed_en,it.seed_zh)+'</td><td>'+it.picked+'</td><td>'+it.won+'</td><td>'+pct(it.win_rate)+'</td><td>'+pct(it.pick_rate)+'</td>');tb.appendChild(tr);});}" +
-                "async function loadRecent(v){let items=[];try{const r=await fetch('/api/recent-matches',{cache:'no-store'});const j=await r.json();items=j.items||[];}catch(_){}if(v!==reqVer)return;const tb=document.querySelector('#recent tbody');tb.innerHTML='';(items||[]).forEach(it=>{const tr=document.createElement('tr');const p=it.plant_name&&it.plant_name.length?it.plant_name:'-';const z=it.zombie_name&&it.zombie_name.length?it.zombie_name:'-';tr.innerHTML='<td>'+it.finished_at+'</td><td>'+p+'</td><td>'+z+'</td><td>'+winnerText(it.winner)+'</td><td>'+it.duration+'</td>';tb.appendChild(tr);});}" +
+                "async function loadRecent(v){let items=[];try{const r=await fetch('/api/recent-matches',{cache:'no-store'});const j=await r.json();items=j.items||[];}catch(_){}if(v!==reqVer)return;const tb=document.querySelector('#recent tbody');tb.innerHTML='';(items||[]).forEach(it=>{const tr=document.createElement('tr');const p=it.plant_name&&it.plant_name.length?it.plant_name:'-';const z=it.zombie_name&&it.zombie_name.length?it.zombie_name:'-';tr.innerHTML='<td>'+fmtTime(it.finished_at)+'</td><td>'+p+'</td><td>'+z+'</td><td>'+winnerText(it.winner)+'</td><td>'+it.duration+'</td>';tb.appendChild(tr);});}" +
                 "async function tick(){const v=++reqVer;await Promise.allSettled([loadDecks(v),loadCards(v),loadRecent(v)]);}" +
                 "function scheduleAutoRefresh(){const now=Date.now();if(now>=nextAutoRefreshAt){nextAutoRefreshAt=now+MIN_AUTO_REFRESH_MS;tick();return;}if(autoRefreshTimer)return;autoRefreshTimer=setTimeout(()=>{autoRefreshTimer=0;nextAutoRefreshAt=Date.now()+MIN_AUTO_REFRESH_MS;tick();},Math.max(0,nextAutoRefreshAt-now));}" +
                 "function renderSideBtns(){const p=document.getElementById('sidePlant');const z=document.getElementById('sideZombie');if(side==='PLANT'){p.classList.add('active');z.classList.remove('active');}else{z.classList.add('active');p.classList.remove('active');}}" +
@@ -522,11 +524,11 @@ final class DashboardServer {
     }
 
     private static String normalizeBoolDefault(String raw, boolean defaultValue) {
-        if (raw == null) return defaultValue ? "true" : "false";
+        if (raw == null) return Boolean.toString(defaultValue);
         String v = raw.trim().toLowerCase(Locale.ROOT);
         if ("true".equals(v) || "1".equals(v) || "on".equals(v)) return "true";
         if ("false".equals(v) || "0".equals(v) || "off".equals(v)) return "false";
-        return defaultValue ? "true" : "false";
+        return Boolean.toString(defaultValue);
     }
 
     private static String normalizeMapFilter(String raw) {

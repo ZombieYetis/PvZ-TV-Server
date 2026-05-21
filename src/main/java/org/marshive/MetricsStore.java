@@ -14,6 +14,7 @@ final class MetricsStore {
     private static final String DB_DIR = "data";
     private static final String DB_PATH = DB_DIR + File.separator + "pvz_metrics.db";
     private static final String DB_URL = "jdbc:sqlite:" + DB_PATH;
+    private static final String UTC_NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%SZ','now')";
 
     private static Connection conn;
     private static boolean initialized = false;
@@ -61,7 +62,7 @@ final class MetricsStore {
     private static long insertMatchResult(String settleId, int roomId, String winner, int mainCounter, AnalyticsCollector.SettlementMeta meta) throws SQLException {
         int frames = Math.max(mainCounter, 0);
         String sql = "INSERT INTO match_results(settle_id, room_id, winner, duration_text, bg, battle_type, game_mode, extra_packet, extended_seeds, ban_mode, balance_patch, mower_loss, target_loss, sunflower_loss, grave_loss, plant_name, zombie_name, finished_at) " +
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))";
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + UTC_NOW_SQL + ")";
         try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setString(1, settleId);
             ps.setInt(2, roomId);
@@ -90,7 +91,7 @@ final class MetricsStore {
 
     private static void insertCardUsage(long matchId, List<AnalyticsCollector.CardUsage> usages) throws SQLException {
         if (usages == null || usages.isEmpty()) return;
-        String sql = "INSERT INTO match_card_usage(match_id, side, seed_type, seed_name, use_count, created_at) VALUES(?, ?, ?, ?, ?, datetime('now'))";
+        String sql = "INSERT INTO match_card_usage(match_id, side, seed_type, seed_name, use_count, created_at) VALUES(?, ?, ?, ?, ?, " + UTC_NOW_SQL + ")";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             for (AnalyticsCollector.CardUsage u : usages) {
                 ps.setLong(1, matchId);
@@ -106,7 +107,7 @@ final class MetricsStore {
 
     private static void insertMatchDecks(long matchId, List<AnalyticsCollector.MatchEvent> events, AnalyticsCollector.SettlementMeta meta) throws SQLException {
         DeckBuild deckBuild = buildDecksFromEvents(events, meta);
-        String sql = "INSERT INTO match_decks(match_id, side, deck_ids, created_at) VALUES(?, ?, ?, datetime('now'))";
+        String sql = "INSERT INTO match_decks(match_id, side, deck_ids, created_at) VALUES(?, ?, ?, " + UTC_NOW_SQL + ")";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             if (deckBuild.plantDeck.size() == deckBuild.slotCount) {
                 ps.setLong(1, matchId);
@@ -127,7 +128,7 @@ final class MetricsStore {
     private static void insertMatchEvents(long matchId, List<AnalyticsCollector.MatchEvent> events) throws SQLException {
         if (events == null || events.isEmpty()) return;
         String sql = "INSERT INTO match_card_events(match_id, seq, side, event_type, seed_type, seed_name, created_at) " +
-                "VALUES(?, ?, ?, ?, ?, ?, datetime('now'))";
+                "VALUES(?, ?, ?, ?, ?, ?, " + UTC_NOW_SQL + ")";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             for (AnalyticsCollector.MatchEvent e : events) {
                 ps.setLong(1, matchId);
@@ -160,9 +161,9 @@ final class MetricsStore {
 
     private static void upsertBanOnly(int seedType) throws SQLException {
         String sql = "INSERT INTO card_stats(seed_type, picked, banned, won, updated_at) " +
-                "VALUES(?,0,1,0,datetime('now')) " +
+                "VALUES(?,0,1,0," + UTC_NOW_SQL + ") " +
                 "ON CONFLICT(seed_type) DO UPDATE SET " +
-                "banned = banned + 1, updated_at = datetime('now')";
+                "banned = banned + 1, updated_at = " + UTC_NOW_SQL;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, seedType);
             ps.executeUpdate();
@@ -171,9 +172,9 @@ final class MetricsStore {
 
     private static void upsertPickedSide(Set<Integer> seeds, boolean won) throws SQLException {
         String sql = "INSERT INTO card_stats(seed_type, picked, banned, won, updated_at) " +
-                "VALUES(?,1,0,?,datetime('now')) " +
+                "VALUES(?,1,0,?," + UTC_NOW_SQL + ") " +
                 "ON CONFLICT(seed_type) DO UPDATE SET " +
-                "picked = picked + 1, won = won + ?, updated_at = datetime('now')";
+                "picked = picked + 1, won = won + ?, updated_at = " + UTC_NOW_SQL;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int winDelta = won ? 1 : 0;
             for (int seed : seeds) {
@@ -326,7 +327,7 @@ final class MetricsStore {
 
     private static void insertRebuiltDecks(Connection c, long matchId, List<AnalyticsCollector.MatchEvent> events, int slotCount) throws SQLException {
         DeckBuild deckBuild = buildDecksFromEvents(events, slotCount);
-        String sql = "INSERT INTO match_decks(match_id, side, deck_ids, created_at) VALUES(?, ?, ?, datetime('now'))";
+        String sql = "INSERT INTO match_decks(match_id, side, deck_ids, created_at) VALUES(?, ?, ?, " + UTC_NOW_SQL + ")";
         try (PreparedStatement ps = c.prepareStatement(sql)) {
             if (deckBuild.plantDeck.size() == deckBuild.slotCount) {
                 ps.setLong(1, matchId);
@@ -379,20 +380,11 @@ final class MetricsStore {
         return sb.toString();
     }
 
-    private static final class DeckBuild {
-        private final Set<Integer> plantDeck;
-        private final Set<Integer> zombieDeck;
-        private final int slotCount;
-
-        private DeckBuild(Set<Integer> plantDeck, Set<Integer> zombieDeck, int slotCount) {
-            this.plantDeck = plantDeck;
-            this.zombieDeck = zombieDeck;
-            this.slotCount = slotCount;
-        }
+    private record DeckBuild(Set<Integer> plantDeck, Set<Integer> zombieDeck, int slotCount) {
     }
 
     private static String boolText(boolean v) {
-        return v ? "true" : "false";
+        return Boolean.toString(v);
     }
 
     private static String mapBattleType(int battleType) {
