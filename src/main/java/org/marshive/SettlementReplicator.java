@@ -6,18 +6,20 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 final class SettlementReplicator {
     private static final Object LOCK = new Object();
-    private static final List<String> pending = new ArrayList<>();
+    private static final LinkedBlockingQueue<String> pending = new LinkedBlockingQueue<>(50_000);
 
     private static String host = "";
     private static int port = 0;
     private static int batchSize = 10;
     private static boolean enabled = false;
-    private static long lastRetryAt = 0L;
+    private static volatile Thread worker;
+    private static volatile String retryLine;
+    private static volatile long retryAfterAt = 0L;
 
     private SettlementReplicator() {
     }
@@ -29,10 +31,12 @@ final class SettlementReplicator {
             batchSize = Math.max(1, batch);
             enabled = !host.isEmpty() && port > 0;
             pending.clear();
-            lastRetryAt = 0L;
+            retryLine = null;
+            retryAfterAt = 0L;
         }
         if (enabled) {
-            System.out.println("[REPL] enabled target=" + host + ":" + port + " batch=" + batchSize);
+            System.out.println("[REPL] enabled target=" + host + ":" + port + " batch=" + batchSize + " mode=async");
+            ensureWorkerStarted();
         }
     }
 
@@ -44,51 +48,85 @@ final class SettlementReplicator {
 
     static void onAcceptedSettlementLine(String line) {
         if (line == null || line.isEmpty()) return;
+        boolean ok;
         synchronized (LOCK) {
             if (!enabled) return;
-            pending.add(line);
+            ok = pending.offer(line);
         }
-        tryFlush(false);
+        if (!ok) {
+            System.out.println("[REPL] queue full, drop one settlement");
+            return;
+        }
+        ensureWorkerStarted();
     }
 
     static void onTick(long now) {
-        boolean shouldRetry;
+        // kept for compatibility; replication is now fully asynchronous in worker thread
+    }
+
+    private static void ensureWorkerStarted() {
         synchronized (LOCK) {
-            shouldRetry = enabled && !pending.isEmpty() && (now - lastRetryAt >= 5000L);
-        }
-        if (shouldRetry) {
-            tryFlush(true);
+            if (!enabled) return;
+            if (worker != null && worker.isAlive()) return;
+            worker = new Thread(SettlementReplicator::runWorker, "settlement-repl");
+            worker.setDaemon(true);
+            worker.start();
         }
     }
 
-    private static void tryFlush(boolean force) {
-        List<String> batch;
-        String h;
-        int p;
-        synchronized (LOCK) {
-            if (!enabled) return;
-            if (!force && pending.size() < batchSize) return;
-            if (pending.isEmpty()) return;
-            int n = force ? Math.min(pending.size(), batchSize) : batchSize;
-            batch = new ArrayList<>(pending.subList(0, n));
-            h = host;
-            p = port;
-        }
-
-        int okCount = 0;
-        for (String line : batch) {
-            if (sendOne(h, p, line)) {
-                okCount++;
-            } else {
-                break;
+    private static void runWorker() {
+        while (true) {
+            String line = null;
+            String h;
+            int p;
+            int drainBurst;
+            synchronized (LOCK) {
+                if (!enabled) {
+                    sleepQuiet(500L);
+                    continue;
+                }
+                h = host;
+                p = port;
+                drainBurst = batchSize;
             }
-        }
 
-        synchronized (LOCK) {
-            lastRetryAt = System.currentTimeMillis();
-            if (okCount > 0) {
-                pending.subList(0, okCount).clear();
-                System.out.println("[REPL] pushed=" + okCount + " pending=" + pending.size());
+            try {
+                long now = System.currentTimeMillis();
+                String pendingRetry = retryLine;
+                if (pendingRetry != null) {
+                    if (now < retryAfterAt) {
+                        sleepQuiet(Math.min(500L, retryAfterAt - now));
+                        continue;
+                    }
+                    line = pendingRetry;
+                } else {
+                    line = pending.poll(500, TimeUnit.MILLISECONDS);
+                    if (line == null) continue;
+                }
+            } catch (InterruptedException ignored) {
+                continue;
+            }
+
+            if (sendOne(h, p, line)) {
+                retryLine = null;
+                retryAfterAt = 0L;
+                int drained = 1;
+                while (drained < drainBurst) {
+                    String next = pending.poll();
+                    if (next == null) break;
+                    if (!sendOne(h, p, next)) {
+                        retryLine = next;
+                        retryAfterAt = System.currentTimeMillis() + 5000L;
+                        break;
+                    }
+                    drained++;
+                }
+                if (drained > 0) {
+                    System.out.println("[REPL] pushed=" + drained + " pending=" + pending.size());
+                }
+            } else {
+                retryLine = line;
+                retryAfterAt = System.currentTimeMillis() + 5000L;
             }
         }
     }
@@ -97,6 +135,7 @@ final class SettlementReplicator {
         try (Socket s = new Socket()) {
             s.connect(new InetSocketAddress(h, p), 2000);
             s.setTcpNoDelay(true);
+            s.setSoTimeout(2000);
             OutputStream out = s.getOutputStream();
             out.write(line.getBytes(StandardCharsets.UTF_8));
             if (!line.endsWith("\n")) out.write('\n');
@@ -110,5 +149,11 @@ final class SettlementReplicator {
             return false;
         }
     }
-}
 
+    private static void sleepQuiet(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ignored) {
+        }
+    }
+}
