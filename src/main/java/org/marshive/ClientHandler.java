@@ -18,6 +18,10 @@ import java.util.concurrent.ThreadLocalRandom;
 
 public class ClientHandler {
     private static final int NETPLAY_VERSION = 3154;
+    private static final int MAX_FRAME_PAYLOAD_BYTES = 65535;
+    private static final int SPECTATOR_LIST_BASE_PAYLOAD_BYTES = 5;
+    private static final int MAX_SPECTATOR_NAMES_IN_ROOM = 6;
+    private static final int MAX_SPECTATORS_PER_ROOM = 30;
 
     private static final byte ERR_BAD_REQ = 1;
     private static final byte ERR_NOT_FOUND = 2;
@@ -490,11 +494,10 @@ public class ClientHandler {
             sendError(ERR_NOT_ALLOWED);
             return;
         }
-        if (r.spectatorCount() >= Room.MAX_SPECTATORS) {
+        if (r.spectatorCount() >= MAX_SPECTATORS_PER_ROOM) {
             sendError(ERR_FULL);
             return;
         }
-
         currentRoom = r;
         isHost = false;
         isSpectator = true;
@@ -602,7 +605,7 @@ public class ClientHandler {
                 sendError(ERR_NOT_ALLOWED);
                 return;
             }
-            if (r.spectatorCount() >= Room.MAX_SPECTATORS) {
+            if (r.spectatorCount() >= MAX_SPECTATORS_PER_ROOM) {
                 sendError(ERR_FULL);
                 return;
             }
@@ -957,16 +960,12 @@ public class ClientHandler {
         // Injecting framed control packets here will corrupt the in-game stream.
         if (room.isGaming()) return;
         int roomId = room.getId();
-        ArrayList<ClientHandler> specs = new ArrayList<>();
-        for (ClientHandler s : room.snapshotSpectators()) {
-            if (s == null || s.closed) continue;
-            specs.add(s);
-        }
-
-        int count = Math.min(255, specs.size());
-        ArrayList<byte[]> names = new ArrayList<>(count);
-        int payloadLen = 4 + 1;
-        for (int i = 0; i < count; i++) {
+        ArrayList<ClientHandler> specs = activeSpectators(room);
+        int totalCount = Math.min(255, specs.size());
+        int namesToSend = Math.min(MAX_SPECTATOR_NAMES_IN_ROOM, specs.size());
+        ArrayList<byte[]> names = new ArrayList<>(namesToSend);
+        int payloadLen = SPECTATOR_LIST_BASE_PAYLOAD_BYTES;
+        for (int i = 0; i < namesToSend; i++) {
             String n = specs.get(i).playerName == null ? "" : specs.get(i).playerName;
             byte[] nb = n.getBytes(StandardCharsets.UTF_8);
             int nl = Math.min(255, nb.length);
@@ -978,7 +977,7 @@ public class ClientHandler {
 
         byte[] payload = new byte[payloadLen];
         writeIntTo(payload, 0, roomId);
-        payload[4] = (byte) count;
+        payload[4] = (byte) totalCount;
         int off = 5;
         for (byte[] nb : names) {
             payload[off++] = (byte) nb.length;
@@ -1011,6 +1010,15 @@ public class ClientHandler {
         }
     }
 
+    private ArrayList<ClientHandler> activeSpectators(Room room) {
+        ArrayList<ClientHandler> specs = new ArrayList<>();
+        for (ClientHandler s : room.snapshotSpectators()) {
+            if (s == null || s.closed) continue;
+            specs.add(s);
+        }
+        return specs;
+    }
+
     private void sendError(byte errCode) throws IOException {
         sendFrame(RespType.ERROR.code, new byte[]{errCode});
     }
@@ -1018,7 +1026,7 @@ public class ClientHandler {
     private void sendFrame(byte respType, byte[] payload) throws IOException {
         if (closed) throw new IOException("channel closed");
         int len = payload == null ? 0 : payload.length;
-        if (len > 65535) throw new IOException("payload too large: " + len);
+        if (len > MAX_FRAME_PAYLOAD_BYTES) throw new IOException("payload too large: " + len);
         ByteBuffer b = ByteBuffer.allocate(1 + 2 + len);
         b.put(respType);
         b.put((byte) ((len >>> 8) & 0xFF));
@@ -1172,7 +1180,7 @@ public class ClientHandler {
         for (Room r : rm.allRooms()) {
             if (r.isGaming()) continue;
             boolean hasGuestSlot = !r.isFull();
-            boolean hasSpectateSlot = r.isSpectateAllowed() && r.spectatorCount() < Room.MAX_SPECTATORS;
+            boolean hasSpectateSlot = r.isSpectateAllowed() && r.spectatorCount() < MAX_SPECTATORS_PER_ROOM;
             if (!hasGuestSlot && !hasSpectateSlot) continue;
             if (list.size() >= 255) break;
             list.add(r);

@@ -4,7 +4,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class Room {
-    public static final int MAX_SPECTATORS = 6;
     private final int id;
     private final String name;
     private final ClientHandler host;
