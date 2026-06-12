@@ -8,6 +8,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -22,6 +23,8 @@ public class ClientHandler {
     private static final int SPECTATOR_LIST_BASE_PAYLOAD_BYTES = 5;
     private static final int MAX_SPECTATOR_NAMES_IN_ROOM = 6;
     private static final int MAX_SPECTATORS_PER_ROOM = 30;
+    private static final int NETPLAY_EVENT_HEADER_BYTES = 2;
+    private static final int MAX_NETPLAY_EVENT_BYTES = 255;
 
     private static final byte ERR_BAD_REQ = 1;
     private static final byte ERR_NOT_FOUND = 2;
@@ -65,6 +68,8 @@ public class ClientHandler {
 
     private final ByteBuffer readBuf = ByteBuffer.allocate(64 * 1024);
     private final Queue<ByteBuffer> writeQ = new ArrayDeque<>();
+    private byte[] spectatorRelayAssembleBuf = new byte[4096];
+    private int spectatorRelayAssembleLen = 0;
 
     ClientHandler(SocketChannel ch, RoomManager rm, int shardId, int probePort, int probePort2) throws IOException {
         this.ch = ch;
@@ -221,16 +226,71 @@ public class ClientHandler {
         if (isSpectator) return;
         if (room.getHost() == null || room.getGuest() == null) return;
 
-        for (ClientHandler s : room.snapshotSpectators()) {
-            if (s == null || s == this || s.closed) continue;
-            if (!s.spectatorStreamRequested) {
-                continue;
-            }
-            try {
-                s.enqueueRaw(raw);
-            } catch (IOException ignored) {
+        appendSpectatorRelayBytes(raw);
+        ArrayList<byte[]> completeEvents = drainSpectatorRelayEvents();
+        if (completeEvents.isEmpty()) {
+            return;
+        }
+
+        ArrayList<ClientHandler> spectators = new ArrayList<>(room.snapshotSpectators());
+        for (byte[] event : completeEvents) {
+            for (ClientHandler s : spectators) {
+                if (s == null || s == this || s.closed) continue;
+                if (!s.spectatorStreamRequested) {
+                    continue;
+                }
+                try {
+                    s.enqueueRaw(event);
+                } catch (IOException ignored) {
+                }
             }
         }
+    }
+
+    private void appendSpectatorRelayBytes(byte[] raw) {
+        if (raw.length == 0) return;
+        ensureSpectatorRelayCapacity(spectatorRelayAssembleLen + raw.length);
+        System.arraycopy(raw, 0, spectatorRelayAssembleBuf, spectatorRelayAssembleLen, raw.length);
+        spectatorRelayAssembleLen += raw.length;
+    }
+
+    private ArrayList<byte[]> drainSpectatorRelayEvents() {
+        ArrayList<byte[]> out = new ArrayList<>();
+        int offset = 0;
+        while (spectatorRelayAssembleLen - offset >= NETPLAY_EVENT_HEADER_BYTES) {
+            int eventSize = spectatorRelayAssembleBuf[offset + 1] & 0xFF;
+            if (eventSize < NETPLAY_EVENT_HEADER_BYTES || eventSize > MAX_NETPLAY_EVENT_BYTES) {
+                offset += 1;
+                continue;
+            }
+            if (spectatorRelayAssembleLen - offset < eventSize) {
+                break;
+            }
+            out.add(Arrays.copyOfRange(spectatorRelayAssembleBuf, offset, offset + eventSize));
+            offset += eventSize;
+        }
+
+        if (offset > 0) {
+            int remain = spectatorRelayAssembleLen - offset;
+            if (remain > 0) {
+                System.arraycopy(spectatorRelayAssembleBuf, offset, spectatorRelayAssembleBuf, 0, remain);
+            }
+            spectatorRelayAssembleLen = remain;
+        }
+        return out;
+    }
+
+    private void ensureSpectatorRelayCapacity(int required) {
+        if (required <= spectatorRelayAssembleBuf.length) return;
+        int newCap = spectatorRelayAssembleBuf.length;
+        while (newCap < required) {
+            newCap *= 2;
+        }
+        spectatorRelayAssembleBuf = Arrays.copyOf(spectatorRelayAssembleBuf, newCap);
+    }
+
+    private void resetSpectatorRelayAssembly() {
+        spectatorRelayAssembleLen = 0;
     }
 
     private boolean tryConsumeOneCommand() throws IOException {
@@ -891,6 +951,8 @@ public class ClientHandler {
         }
         host.p2pFallbackDeadlineAtMillis = 0;
         guest.p2pFallbackDeadlineAtMillis = 0;
+        host.resetSpectatorRelayAssembly();
+        guest.resetSpectatorRelayAssembly();
 
         byte[] relayPayload = new byte[4];
         writeIntTo(relayPayload, 0, relayEpoch);
@@ -946,6 +1008,7 @@ public class ClientHandler {
     private void enableRelayWith(ClientHandler peer) {
         this.relayPeer = peer;
         this.relayDataMode = true;
+        resetSpectatorRelayAssembly();
     }
 
     private void sendJoinResult(boolean ok, int roomId, int roomVersion, String hostName, byte role, byte roomFlags) throws IOException {
@@ -1335,6 +1398,7 @@ public class ClientHandler {
         currentRoom = null;
         relayDataMode = false;
         relayPeer = null;
+        resetSpectatorRelayAssembly();
         if (room == null) {
             isHost = false;
             isSpectator = false;
@@ -1420,6 +1484,7 @@ public class ClientHandler {
         p2pFallbackDeadlineAtMillis = 0L;
         relayDataMode = false;
         relayPeer = null;
+        resetSpectatorRelayAssembly();
     }
 
     void onRoomRemovedByServer() {
@@ -1436,6 +1501,7 @@ public class ClientHandler {
         p2pFallbackDeadlineAtMillis = 0L;
         relayDataMode = false;
         relayPeer = null;
+        resetSpectatorRelayAssembly();
     }
 
     private void touchActivity() {
