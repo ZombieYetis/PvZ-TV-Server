@@ -21,7 +21,8 @@ public enum MsgType {
     ASK_START((byte) 0x0D),
     SET_SPECTATE((byte) 0x0E),
     JOIN_SPECTATE((byte) 0x0F),
-    SWITCH_ROLE((byte) 0x10);
+    SWITCH_ROLE((byte) 0x10),
+    RESERVE_SPECTATE((byte) 0x11);
 
     public final byte code;
 

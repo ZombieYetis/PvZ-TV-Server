@@ -61,6 +61,7 @@ public class ClientHandler {
 
     private boolean relayDataMode = false;
     private ClientHandler relayPeer;
+    private boolean spectatorStreamRequested = false;
 
     private final ByteBuffer readBuf = ByteBuffer.allocate(64 * 1024);
     private final Queue<ByteBuffer> writeQ = new ArrayDeque<>();
@@ -113,14 +114,20 @@ public class ClientHandler {
             return;
         }
 
-        // In relay mode, spectators reuse the same socket for downlink game stream.
-        // Their uplink bytes are not protocol commands and must never enter command parser.
         Room room = currentRoom;
-        if (isSpectator && room != null && room.isGaming() && room.isRelayDataOpen()) {
-            ByteBuffer tmp = ByteBuffer.allocate(4096);
-            int n = ch.read(tmp);
+        if (isSpectator && room != null && room.isGaming()) {
+            int n = ch.read(readBuf);
             if (n < 0) throw new EOFException("Spectator disconnected");
-            if (n > 0) touchActivity();
+            if (n == 0) return;
+            touchActivity();
+            readBuf.flip();
+            try {
+                while (tryConsumeOneCommand()) {
+                    // Spectators in battle only send explicit control commands.
+                }
+            } finally {
+                readBuf.compact();
+            }
             return;
         }
 
@@ -216,6 +223,9 @@ public class ClientHandler {
 
         for (ClientHandler s : room.snapshotSpectators()) {
             if (s == null || s == this || s.closed) continue;
+            if (!s.spectatorStreamRequested) {
+                continue;
+            }
             try {
                 s.enqueueRaw(raw);
             } catch (IOException ignored) {
@@ -326,6 +336,12 @@ public class ClientHandler {
                 handleSwitchRole(toSpectator != 0);
                 return true;
             }
+            case RESERVE_SPECTATE: {
+                if (readBuf.remaining() < 1) return false;
+                int reserve = u8(readBuf.get());
+                handleReserveSpectate(reserve != 0);
+                return true;
+            }
             case LEAVE:
                 throw new IOException("User left (disconnect)");
             default:
@@ -375,7 +391,7 @@ public class ClientHandler {
         }
         Room r = rm.getRoom(roomId);
         if (r == null) {
-            sendJoinResult(false, 0, 0, "", (byte) 0);
+            sendJoinResult(false, 0, 0, "", (byte) 0, (byte) 0);
             return;
         }
         if (r.isGaming()) {
@@ -387,13 +403,13 @@ public class ClientHandler {
             return;
         }
         if (r.getProtocolVersion() != clientVersion) {
-            sendJoinResult(false, roomId, r.getProtocolVersion(), "", (byte) 0);
+            sendJoinResult(false, roomId, r.getProtocolVersion(), "", (byte) 0, buildRoomJoinFlags(r));
             return;
         }
 
         boolean ok = rm.joinRoom(roomId, this);
         if (!ok) {
-            sendJoinResult(false, 0, r.getProtocolVersion(), "", (byte) 0);
+            sendJoinResult(false, 0, r.getProtocolVersion(), "", (byte) 0, buildRoomJoinFlags(r));
             return;
         }
 
@@ -403,7 +419,7 @@ public class ClientHandler {
         protocolVersion = clientVersion;
         playerName = guestName;
 
-        sendJoinResult(true, roomId, r.getProtocolVersion(), r.getName(), (byte) 0);
+        sendJoinResult(true, roomId, r.getProtocolVersion(), r.getName(), (byte) 0, buildRoomJoinFlags(r));
 
         notifyRoomGuestJoined(currentRoom, guestName);
         logGuestFlow("JOINED", currentRoom, this);
@@ -479,15 +495,11 @@ public class ClientHandler {
         }
         Room r = rm.getRoom(roomId);
         if (r == null) {
-            sendJoinResult(false, 0, 0, "", (byte) 1);
+            sendJoinResult(false, 0, 0, "", (byte) 1, (byte) 0);
             return;
         }
         if (r.getProtocolVersion() != clientVersion) {
-            sendJoinResult(false, roomId, r.getProtocolVersion(), "", (byte) 1);
-            return;
-        }
-        if (r.isGaming()) {
-            sendError(ERR_NOT_READY);
+            sendJoinResult(false, roomId, r.getProtocolVersion(), "", (byte) 1, buildRoomJoinFlags(r));
             return;
         }
         if (!r.isSpectateAllowed()) {
@@ -501,10 +513,11 @@ public class ClientHandler {
         currentRoom = r;
         isHost = false;
         isSpectator = true;
+        spectatorStreamRequested = !r.isGaming();
         protocolVersion = clientVersion;
         playerName = watcherName;
         r.addSpectator(this);
-        sendJoinResult(true, roomId, r.getProtocolVersion(), r.getName(), (byte) 1);
+        sendJoinResult(true, roomId, r.getProtocolVersion(), r.getName(), (byte) 1, buildRoomJoinFlags(r));
         ClientHandler guest = r.getGuest();
         if (guest != null && guest.playerName != null && !guest.playerName.isEmpty()) {
             byte[] guestNameBytes = guest.playerName.getBytes(StandardCharsets.UTF_8);
@@ -516,6 +529,10 @@ public class ClientHandler {
             sendFrame(RespType.GUEST_JOINED.code, payload);
         }
         broadcastSpectatorList(r);
+        sendSpectatorListTo(r, this);
+        if (spectatorStreamRequested) {
+            sendRelayStateToSpectator(r, this);
+        }
     }
 
     private void handleExitRoom() throws IOException {
@@ -560,6 +577,7 @@ public class ClientHandler {
         }
         if (isSpectator) {
             currentRoom.removeSpectator(this);
+            spectatorStreamRequested = false;
             broadcastSpectatorList(currentRoom);
             currentRoom = null;
             isHost = false;
@@ -611,8 +629,9 @@ public class ClientHandler {
             }
             r.setGuest(null);
             isSpectator = true;
+            spectatorStreamRequested = !r.isGaming();
             r.addSpectator(this);
-            sendJoinResult(true, r.getId(), r.getProtocolVersion(), r.getName(), (byte) 1);
+            sendJoinResult(true, r.getId(), r.getProtocolVersion(), r.getName(), (byte) 1, buildRoomJoinFlags(r));
             notifyHostGuestLeft(r);
             sendRoomProbeState(r);
             broadcastSpectateState(r);
@@ -629,9 +648,10 @@ public class ClientHandler {
             return;
         }
         r.removeSpectator(this);
+        spectatorStreamRequested = false;
         r.setGuest(this);
         isSpectator = false;
-        sendJoinResult(true, r.getId(), r.getProtocolVersion(), r.getName(), (byte) 0);
+        sendJoinResult(true, r.getId(), r.getProtocolVersion(), r.getName(), (byte) 0, buildRoomJoinFlags(r));
 
         notifyRoomGuestJoined(r, playerName);
         sendRoomProbeState(r);
@@ -739,6 +759,25 @@ public class ClientHandler {
             return;
         }
         markRelayReady(currentRoom, relayEpoch);
+    }
+
+    private void handleReserveSpectate(boolean reserve) throws IOException {
+        Room room = currentRoom;
+        if (!isSpectator || room == null) {
+            sendError(ERR_BAD_REQ);
+            return;
+        }
+        if (!room.isGaming()) {
+            sendError(ERR_NOT_READY);
+            return;
+        }
+        if (!reserve) {
+            sendError(ERR_BAD_REQ);
+            return;
+        }
+        spectatorStreamRequested = true;
+        sendReserveSpectateAck(room, true);
+        sendRelayStateToSpectator(room, this);
     }
 
     private boolean tryBeginP2PNegotiation(Room room) {
@@ -859,7 +898,7 @@ public class ClientHandler {
             host.sendFrame(RespType.RELAY_BEGIN.code, relayPayload);
             guest.sendFrame(RespType.RELAY_BEGIN.code, relayPayload);
             for (ClientHandler s : room.snapshotSpectators()) {
-                if (s == null || s.closed) continue;
+                if (s == null || s.closed || !s.spectatorStreamRequested) continue;
                 s.sendFrame(RespType.RELAY_BEGIN.code, relayPayload);
             }
         } catch (IOException ignored) {
@@ -893,7 +932,7 @@ public class ClientHandler {
         host.sendFrame(RespType.RELAY_GO.code, payload);
         guest.sendFrame(RespType.RELAY_GO.code, payload);
         for (ClientHandler s : room.snapshotSpectators()) {
-            if (s == null || s.closed) continue;
+            if (s == null || s.closed || !s.spectatorStreamRequested) continue;
             try {
                 s.sendFrame(RespType.RELAY_GO.code, payload);
             } catch (IOException ignored) {
@@ -909,16 +948,17 @@ public class ClientHandler {
         this.relayDataMode = true;
     }
 
-    private void sendJoinResult(boolean ok, int roomId, int roomVersion, String hostName, byte role) throws IOException {
+    private void sendJoinResult(boolean ok, int roomId, int roomVersion, String hostName, byte role, byte roomFlags) throws IOException {
         byte[] hostNameBytes = hostName == null ? new byte[0] : hostName.getBytes(StandardCharsets.UTF_8);
         int hostNameLen = Math.min(255, hostNameBytes.length);
-        byte[] payload = new byte[1 + 4 + 4 + 1 + hostNameLen + 1];
+        byte[] payload = new byte[1 + 4 + 4 + 1 + hostNameLen + 1 + 1];
         payload[0] = (byte) (ok ? 1 : 0);
         writeIntTo(payload, 1, roomId);
         writeIntTo(payload, 5, roomVersion);
         payload[9] = (byte) hostNameLen;
         if (hostNameLen > 0) System.arraycopy(hostNameBytes, 0, payload, 10, hostNameLen);
         payload[10 + hostNameLen] = role;
+        payload[11 + hostNameLen] = roomFlags;
         sendFrame(RespType.JOIN_RESULT.code, payload);
     }
 
@@ -959,6 +999,43 @@ public class ClientHandler {
         // During active gameplay, sockets are carrying raw battle stream.
         // Injecting framed control packets here will corrupt the in-game stream.
         if (room.isGaming()) return;
+        byte[] payload = buildSpectatorListPayload(room);
+        if (payload == null) return;
+        ClientHandler host = room.getHost();
+        ClientHandler guest = room.getGuest();
+        if (host != null && !host.closed) {
+            try {
+                host.sendFrame(RespType.SPECTATOR_LIST.code, payload);
+            } catch (IOException ignored) {
+            }
+        }
+        if (guest != null && !guest.closed) {
+            try {
+                guest.sendFrame(RespType.SPECTATOR_LIST.code, payload);
+            } catch (IOException ignored) {
+            }
+        }
+        for (ClientHandler s : activeSpectators(room)) {
+            if (s == null || s.closed) continue;
+            try {
+                s.sendFrame(RespType.SPECTATOR_LIST.code, payload);
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    private void sendSpectatorListTo(Room room, ClientHandler target) {
+        if (room == null || target == null || target.closed) return;
+        byte[] payload = buildSpectatorListPayload(room);
+        if (payload == null) return;
+        try {
+            target.sendFrame(RespType.SPECTATOR_LIST.code, payload);
+        } catch (IOException ignored) {
+        }
+    }
+
+    private byte[] buildSpectatorListPayload(Room room) {
+        if (room == null) return null;
         int roomId = room.getId();
         ArrayList<ClientHandler> specs = activeSpectators(room);
         int totalCount = Math.min(255, specs.size());
@@ -986,28 +1063,7 @@ public class ClientHandler {
                 off += nb.length;
             }
         }
-
-        ClientHandler host = room.getHost();
-        ClientHandler guest = room.getGuest();
-        if (host != null && !host.closed) {
-            try {
-                host.sendFrame(RespType.SPECTATOR_LIST.code, payload);
-            } catch (IOException ignored) {
-            }
-        }
-        if (guest != null && !guest.closed) {
-            try {
-                guest.sendFrame(RespType.SPECTATOR_LIST.code, payload);
-            } catch (IOException ignored) {
-            }
-        }
-        for (ClientHandler s : specs) {
-            if (s == null || s.closed) continue;
-            try {
-                s.sendFrame(RespType.SPECTATOR_LIST.code, payload);
-            } catch (IOException ignored) {
-            }
-        }
+        return payload;
     }
 
     private ArrayList<ClientHandler> activeSpectators(Room room) {
@@ -1178,8 +1234,7 @@ public class ClientHandler {
     private byte[] buildRoomListPayload() {
         ArrayList<Room> list = new ArrayList<>();
         for (Room r : rm.allRooms()) {
-            if (r.isGaming()) continue;
-            boolean hasGuestSlot = !r.isFull();
+            boolean hasGuestSlot = !r.isGaming() && !r.isFull();
             boolean hasSpectateSlot = r.isSpectateAllowed() && r.spectatorCount() < MAX_SPECTATORS_PER_ROOM;
             if (!hasGuestSlot && !hasSpectateSlot) continue;
             if (list.size() >= 255) break;
@@ -1287,6 +1342,7 @@ public class ClientHandler {
         }
         if (isSpectator) {
             room.removeSpectator(this);
+            spectatorStreamRequested = false;
             broadcastSpectatorList(room);
             isSpectator = false;
             isHost = false;
@@ -1320,6 +1376,7 @@ public class ClientHandler {
         }
         isHost = false;
         isSpectator = false;
+        spectatorStreamRequested = false;
     }
 
     private void kickFromRoomByIdle() {
@@ -1359,6 +1416,7 @@ public class ClientHandler {
         currentRoom = null;
         isHost = false;
         isSpectator = false;
+        spectatorStreamRequested = false;
         p2pFallbackDeadlineAtMillis = 0L;
         relayDataMode = false;
         relayPeer = null;
@@ -1374,6 +1432,7 @@ public class ClientHandler {
         currentRoom = null;
         isHost = false;
         isSpectator = false;
+        spectatorStreamRequested = false;
         p2pFallbackDeadlineAtMillis = 0L;
         relayDataMode = false;
         relayPeer = null;
@@ -1418,6 +1477,45 @@ public class ClientHandler {
 
     private static int u8(byte b) {
         return b & 0xFF;
+    }
+
+    private static byte buildRoomJoinFlags(Room room) {
+        int flags = 0;
+        if (room != null && room.isGaming()) {
+            flags |= 1;
+        }
+        return (byte) flags;
+    }
+
+    private void sendRelayStateToSpectator(Room room, ClientHandler spectator) throws IOException {
+        if (room == null || spectator == null || spectator.closed || !spectator.isSpectator || !spectator.spectatorStreamRequested) {
+            return;
+        }
+        if (!room.isRelayMode()) {
+            return;
+        }
+        int relayEpoch = room.getRelayEpoch();
+        if (relayEpoch == 0) {
+            return;
+        }
+
+        byte[] payload = new byte[4];
+        writeIntTo(payload, 0, relayEpoch);
+        spectator.sendFrame(RespType.RELAY_BEGIN.code, payload);
+        if (room.isRelayDataOpen()) {
+            spectator.sendFrame(RespType.RELAY_GO.code, payload);
+        }
+    }
+
+    private void sendReserveSpectateAck(Room room, boolean reserve) throws IOException {
+        if (room == null) return;
+        byte[] payload = new byte[11];
+        writeIntTo(payload, 0, room.getId());
+        payload[4] = (byte) (reserve ? 1 : 0);
+        payload[5] = (byte) (room.isRelayMode() ? 1 : 0);
+        payload[6] = (byte) (room.isRelayDataOpen() ? 1 : 0);
+        writeIntTo(payload, 7, room.getRelayEpoch());
+        sendFrame(RespType.RESERVE_SPECTATE_ACK.code, payload);
     }
 
     private static void writeIntTo(byte[] b, int off, int v) {

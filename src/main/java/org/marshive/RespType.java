@@ -18,6 +18,7 @@ public enum RespType {
     CLIENT_WANT_START((byte) 0x8D),
     SPECTATE_STATE((byte) 0x8E),
     SPECTATOR_LIST((byte) 0x8F),
+    RESERVE_SPECTATE_ACK((byte) 0x90),
 
     ERROR((byte) 0xFF);
 
