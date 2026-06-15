@@ -1,4 +1,13 @@
-/target/
-/.idea/
+# macOS
+.DS_Store
+
+# IntelliJ
+.idea/
 *.iml
-/PvZ-TV-server.jar
+
+# Other IDEs
+.vscode/
+
+# Generated files
+/target/
+PvZ-TV-server.jar
