@@ -108,6 +108,7 @@ final class SeedTypeNames {
         put(92, "GIGA_FOOTBALL_ZOMBIE");
         put(93, "SUPER_FAN_IMP");
         put(94, "JACKSON_ZOMBIE");
+        put(95, "GIGA_POLE_VAULTING_ZOMBIE");
         put(96, "WALLNUT_HEAD_ZOMBIE");
         put(97, "BOSS");
         put(98, "REDEYED_GARGANTUAR");
