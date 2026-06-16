@@ -1,0 +1,26 @@
+name: Java CI with Maven
+
+on: [ push, pull_request ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          java-version: 17
+          distribution: temurin
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn package
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: PvZ-TV-server
+          path: target/PvZ-TV-server.jar
