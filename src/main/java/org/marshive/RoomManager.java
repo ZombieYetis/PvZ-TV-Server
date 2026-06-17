@@ -10,6 +10,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
 public class RoomManager {
+    static final int MAX_ROOMS_PER_SHARD = 512;
     private final Map<Integer, Room> rooms = new ConcurrentHashMap<>();
     private final AtomicInteger idGen;
     private final int shardId;
@@ -64,6 +65,23 @@ public class RoomManager {
 
     public Iterable<Room> allRooms() {
         return rooms.values();
+    }
+
+    public int roomCount() {
+        return rooms.size();
+    }
+
+    public int hostedRoomCountByIp(String ip) {
+        int count = 0;
+        String targetIp = (ip == null || ip.isBlank()) ? "unknown" : ip;
+        for (Room r : rooms.values()) {
+            if (r == null) continue;
+            ClientHandler host = r.getHost();
+            if (host != null && targetIp.equals(host.getRemoteIp())) {
+                count++;
+            }
+        }
+        return count;
     }
 
     public int removeStaleNotGamingRooms(long nowMillis, long ttlMillis) {

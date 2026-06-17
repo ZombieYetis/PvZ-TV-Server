@@ -143,7 +143,19 @@ public class ServerApp {
                         if (binding == null) continue;
                         SocketChannel ch = ssc.accept();
                         if (ch == null) continue;
-                        ClientHandler h = new ClientHandler(ch, rms[binding.shardId], binding.shardId, binding.probePort, binding.probePort2);
+                        String remoteIp = remoteIpOf(ch);
+                        if (!AbuseGuard.tryOpenConnection(remoteIp)) {
+                            ch.close();
+                            continue;
+                        }
+                        ClientHandler h;
+                        try {
+                            h = new ClientHandler(ch, rms[binding.shardId], binding.shardId, binding.probePort, binding.probePort2, remoteIp);
+                        } catch (IOException e) {
+                            AbuseGuard.closeConnection(remoteIp);
+                            ch.close();
+                            continue;
+                        }
                         SelectionKey clientKey = ch.register(selector, SelectionKey.OP_READ);
                         h.key = clientKey;
                         clientKey.attach(h);
@@ -210,6 +222,16 @@ public class ServerApp {
         }, (probeIndex == 1 ? "probe-" : "probe2-") + probePort);
         t.setDaemon(false);
         t.start();
+    }
+
+    private static String remoteIpOf(SocketChannel ch) {
+        try {
+            if (ch.getRemoteAddress() instanceof InetSocketAddress a && a.getAddress() != null) {
+                return a.getAddress().getHostAddress();
+            }
+        } catch (IOException ignored) {
+        }
+        return "unknown";
     }
 
     private static void startMetricsThread(int metricsPort) {
