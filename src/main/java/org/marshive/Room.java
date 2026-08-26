@@ -20,6 +20,8 @@ public class Room {
     private volatile boolean relayDataOpen = false;
     private volatile int p2pAttempt = 0;
     private volatile boolean p2pReprobePending = false;
+    private volatile boolean hostP2pOk = false;
+    private volatile boolean guestP2pOk = false;
     private volatile boolean spectateAllowed = false;
     private volatile boolean forceRelay = false;
     private final List<ClientHandler> spectators = new ArrayList<>();
@@ -142,6 +144,30 @@ public class Room {
 
     public void setP2pReprobePending(boolean p2pReprobePending) {
         this.p2pReprobePending = p2pReprobePending;
+    }
+
+    public synchronized void resetP2pOk() {
+        hostP2pOk = false;
+        guestP2pOk = false;
+    }
+
+    public synchronized boolean markP2pOk(ClientHandler client) {
+        if (client == host) {
+            hostP2pOk = true;
+        } else if (client == guest) {
+            guestP2pOk = true;
+        } else {
+            return false;
+        }
+        return hostP2pOk && guestP2pOk;
+    }
+
+    public boolean isHostP2pOk() {
+        return hostP2pOk;
+    }
+
+    public boolean isGuestP2pOk() {
+        return guestP2pOk;
     }
 
     public boolean isSpectateAllowed() {

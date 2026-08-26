@@ -563,6 +563,7 @@ public class ClientHandler {
             currentRoom.setRelayDataOpen(false);
             currentRoom.setP2pAttempt(0);
             currentRoom.setP2pReprobePending(false);
+            currentRoom.resetP2pOk();
         }
         AnalyticsCollector.onMatchStart(currentRoom.getId());
         boolean p2pStarted;
@@ -852,7 +853,21 @@ public class ClientHandler {
             sendError(ERR_NOT_ALLOWED);
             return;
         }
-        finishP2P(currentRoom);
+
+        Room room = currentRoom;
+        boolean bothReady = room.markP2pOk(this);
+        System.out.println("[P2P_OK][shard=" + shardId + "][room=" + room.getId() + "] from="
+                + (isHost ? "HOST" : "GUEST")
+                + " hostReady=" + room.isHostP2pOk()
+                + " guestReady=" + room.isGuestP2pOk());
+
+        // A direct socket being ready on one peer does not mean the other peer
+        // has adopted/accepted its side yet. Keep the negotiation/fallback
+        // timer alive until both peers acknowledge their direct socket.
+        if (!bothReady) {
+            return;
+        }
+        finishP2P(room);
     }
 
     private void handleP2PFail() throws IOException {
@@ -909,6 +924,7 @@ public class ClientHandler {
         byte[] toHost = buildP2pInfoPayload(room.getId(), guest);
         byte[] toGuest = buildP2pInfoPayload(room.getId(), host);
         synchronized (room) {
+            room.resetP2pOk();
             room.setP2pNegotiating(true);
             room.setP2pEstablished(false);
             room.setRelayMode(false);
@@ -970,6 +986,13 @@ public class ClientHandler {
             beginRelayFallback(room);
             return;
         }
+        if (!room.isHostP2pOk() || !room.isGuestP2pOk()) {
+            System.out.println("[P2P] ignore premature finish room=" + room.getId()
+                    + " hostReady=" + room.isHostP2pOk()
+                    + " guestReady=" + room.isGuestP2pOk());
+            return;
+        }
+
         synchronized (room) {
             if (room.isRelayMode() || room.isP2pEstablished()) return;
             room.setP2pNegotiating(false);

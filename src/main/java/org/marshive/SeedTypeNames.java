@@ -120,7 +120,7 @@ final class SeedTypeNames {
         put(101, "TELEPORTATION_ZOMBIE");
         put(200, "ICEBERG_LETTUCE");
         put(201, "BLOOMERANG");
-        put(201, "BONK_CHOY");
+        put(202, "BONK_CHOY");
         put(203, "CELERY_STALKER");
         put(204, "SPORE_SHROOM");
         put(205, "SWEET_POTATO");
