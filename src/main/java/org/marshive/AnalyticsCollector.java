@@ -13,6 +13,8 @@ import java.nio.charset.StandardCharsets;
 
 final class AnalyticsCollector {
     private static final int MAX_FINAL_PICKS_PER_SIDE = 8;
+    private static final int MAX_EVENTS = 512;
+    private static final int MAX_STATS_CARDS = 4096;
     private static final ConcurrentHashMap<Integer, CardStats> STATS = new ConcurrentHashMap<>();
 
     private AnalyticsCollector() {
@@ -31,6 +33,7 @@ final class AnalyticsCollector {
     }
 
     static String ingestSettlement(String line) {
+        if (line == null || line.length() > ResourceLimits.MAX_SETTLEMENT_BYTES) return "ERR";
         try {
             // New: SETTLE|settleId|roomId|winner|mainCounter|events|meta
             // Old compat: SETTLE|roomId|winner|mainCounter|events
@@ -63,7 +66,9 @@ final class AnalyticsCollector {
 
             List<MatchEvent> events = new ArrayList<>();
             if (!eventsRaw.isEmpty()) {
-                String[] items = eventsRaw.split(";");
+                String[] items = eventsRaw.split(";", MAX_EVENTS + 1);
+                // Keep compatibility with a trailing separator at the exact event limit.
+                if (items.length > MAX_EVENTS && !items[MAX_EVENTS].isEmpty()) return "ERR";
                 for (String item : items) {
                     String t = item == null ? "" : item.trim();
                     if (t.isEmpty()) continue;
@@ -79,13 +84,13 @@ final class AnalyticsCollector {
                 }
             }
 
-            applyStatsFromSettlement(events, plantWin);
             Set<Integer> plantCards = collectFinalPicks(events, "PLANT");
             Set<Integer> zombieCards = collectFinalPicks(events, "ZOMBIE");
             SettlementMeta meta = parseMeta(metaRaw);
             MetricsStore.RecordResult dbResult = MetricsStore.recordMatch(settleId, roomId, plantWin, mainCounter, plantCards, zombieCards, events, meta);
             if (dbResult == MetricsStore.RecordResult.DUPLICATE) return "OK_DUP";
             if (dbResult == MetricsStore.RecordResult.FAILED) return "ERR";
+            applyStatsFromSettlement(events, plantWin);
             return "OK";
         } catch (Exception e) {
             System.out.println("[SETTLE] parse failed: " + e.getMessage());
@@ -226,7 +231,8 @@ final class AnalyticsCollector {
         Set<Integer> zombiePicks = new LinkedHashSet<>();
         for (MatchEvent e : events) {
             if ("BAN".equals(e.eventType)) {
-                stats(e.seedType).disabled.incrementAndGet();
+                CardStats s = stats(e.seedType);
+                if (s != null) s.disabled.incrementAndGet();
             } else if ("PICK".equals(e.eventType)) {
                 if ("PLANT".equals(e.side) && plantPicks.size() < MAX_FINAL_PICKS_PER_SIDE) plantPicks.add(e.seedType);
                 if ("ZOMBIE".equals(e.side) && zombiePicks.size() < MAX_FINAL_PICKS_PER_SIDE)
@@ -235,18 +241,25 @@ final class AnalyticsCollector {
         }
         for (int seed : plantPicks) {
             CardStats s = stats(seed);
+            if (s == null) continue;
             s.picked.incrementAndGet();
             if (plantWin) s.won.incrementAndGet();
         }
         for (int seed : zombiePicks) {
             CardStats s = stats(seed);
+            if (s == null) continue;
             s.picked.incrementAndGet();
             if (!plantWin) s.won.incrementAndGet();
         }
     }
 
-    private static CardStats stats(int seedType) {
-        return STATS.computeIfAbsent(seedType, k -> new CardStats());
+    private static synchronized CardStats stats(int seedType) {
+        CardStats existing = STATS.get(seedType);
+        if (existing != null) return existing;
+        if (STATS.size() >= MAX_STATS_CARDS) return null;
+        CardStats created = new CardStats();
+        STATS.put(seedType, created);
+        return created;
     }
 
     static String snapshotSummary() {

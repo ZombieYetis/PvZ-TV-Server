@@ -1,17 +1,15 @@
 package org.marshive;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ScheduledFuture;
 
 final class SettlementReplicator {
     private static final Object LOCK = new Object();
-    private static final LinkedBlockingQueue<String> pending = new LinkedBlockingQueue<>(50_000);
+    private static final SettlementQueue pending = new SettlementQueue(ResourceLimits.MAX_REPLICATION_BYTES, 4096);
+    private static long dropped;
 
     private static String host = "";
     private static int port = 0;
@@ -54,7 +52,9 @@ final class SettlementReplicator {
             ok = pending.offer(line);
         }
         if (!ok) {
-            System.out.println("[REPL] queue full, drop one settlement");
+            synchronized (LOCK) {
+                if (++dropped % 100 == 1) System.out.println("[REPL] queue budget exceeded; dropped=" + dropped);
+            }
             return;
         }
         ensureWorkerStarted();
@@ -63,6 +63,8 @@ final class SettlementReplicator {
     static void onTick(long now) {
         // kept for compatibility; replication is now fully asynchronous in worker thread
     }
+
+    static long queuedBytes() { return pending.bytes(); }
 
     private static void ensureWorkerStarted() {
         synchronized (LOCK) {
@@ -80,14 +82,16 @@ final class SettlementReplicator {
             String h;
             int p;
             int drainBurst;
+            boolean active;
             synchronized (LOCK) {
-                if (!enabled) {
-                    sleepQuiet(500L);
-                    continue;
-                }
+                active = enabled;
                 h = host;
                 p = port;
                 drainBurst = batchSize;
+            }
+            if (!active) {
+                sleepQuiet(500L);
+                continue;
             }
 
             try {
@@ -100,7 +104,7 @@ final class SettlementReplicator {
                     }
                     line = pendingRetry;
                 } else {
-                    line = pending.poll(500, TimeUnit.MILLISECONDS);
+                    line = pending.poll(500);
                     if (line == null) continue;
                 }
             } catch (InterruptedException ignored) {
@@ -112,7 +116,13 @@ final class SettlementReplicator {
                 retryAfterAt = 0L;
                 int drained = 1;
                 while (drained < drainBurst) {
-                    String next = pending.poll();
+                    String next;
+                    try {
+                        next = pending.poll(0);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
                     if (next == null) break;
                     if (!sendOne(h, p, next)) {
                         retryLine = next;
@@ -133,17 +143,20 @@ final class SettlementReplicator {
 
     private static boolean sendOne(String h, int p, String line) {
         try (Socket s = new Socket()) {
-            s.connect(new InetSocketAddress(h, p), 2000);
-            s.setTcpNoDelay(true);
-            s.setSoTimeout(2000);
-            OutputStream out = s.getOutputStream();
-            out.write(line.getBytes(StandardCharsets.UTF_8));
-            if (!line.endsWith("\n")) out.write('\n');
-            out.flush();
+            ScheduledFuture<?> deadline = ServerHealth.closeAfter(s, 5000);
+            try {
+                s.connect(new InetSocketAddress(h, p), 2000);
+                s.setTcpNoDelay(true);
+                OutputStream out = s.getOutputStream();
+                out.write(line.getBytes(StandardCharsets.UTF_8));
+                if (!line.endsWith("\n")) out.write('\n');
+                out.flush();
 
-            BufferedReader r = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
-            String resp = r.readLine();
-            return "OK".equals(resp) || "OK_DUP".equals(resp);
+                String resp = BoundedLineReader.read(s, 64, 2000);
+                return "OK".equals(resp) || "OK_DUP".equals(resp);
+            } finally {
+                deadline.cancel(false);
+            }
         } catch (Exception e) {
             System.out.println("[REPL] send failed: " + e.getMessage());
             return false;

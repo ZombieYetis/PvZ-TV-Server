@@ -18,6 +18,7 @@ import java.util.Objects;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class ClientHandler {
     private static final int NETPLAY_VERSION = 3154;
@@ -39,6 +40,9 @@ public class ClientHandler {
     static final long P2P_FALLBACK_MS = 5000L;
     private static final int MAX_BAD_COMMANDS = 5;
     private static final int MAX_PENDING_WRITE_BYTES = 1024 * 1024;
+    private static final int MAX_PENDING_WRITE_BUFFERS = 4096;
+    private static final BufferBudget WRITE_BUDGET = new BufferBudget(
+            ResourceLimits.MAX_QUEUED_BYTES, ResourceLimits.MAX_QUEUED_BUFFERS);
     private static final int MAX_ACTIVE_ROOMS_PER_IP = 4;
     private static final int MIN_PLAUSIBLE_NETPLAY_VERSION = 3000;
     private static final int MAX_PLAUSIBLE_NETPLAY_VERSION = 5000;
@@ -56,7 +60,9 @@ public class ClientHandler {
     private Room currentRoom;
     private boolean isHost = false;
     private boolean isSpectator = false;
-    private boolean closed = false;
+    private volatile boolean closed = false;
+    private final AtomicReference<ObservedProbe> pendingProbe1 = new AtomicReference<>();
+    private final AtomicReference<ObservedProbe> pendingProbe2 = new AtomicReference<>();
 
     private int natPort = -1;
     private String observedNatIp1 = "";
@@ -75,7 +81,8 @@ public class ClientHandler {
     private boolean spectatorStreamRequested = false;
     private boolean spectatorRelayOpen = false;
     private int badCommandCount = 0;
-    private int pendingWriteBytes = 0;
+    private int retainedWriteBytes = 0;
+    private boolean writeOverflow;
 
     private final ByteBuffer readBuf = ByteBuffer.allocate(64 * 1024);
     private final Queue<ByteBuffer> writeQ = new ArrayDeque<>();
@@ -118,14 +125,15 @@ public class ClientHandler {
 
     static void acceptP2PProbe(int token, Socket probeSocket, int probeIndex) {
         ClientHandler handler = PROBE_WAITERS.get(token);
-        if (handler == null) return;
-        handler.updateObservedEndpoint(probeSocket, probeIndex);
+        if (handler == null || handler.closed) return;
+        ObservedProbe probe = new ObservedProbe(token,
+                probeSocket.getInetAddress().getHostAddress(), probeSocket.getPort());
+        // Coalesce each endpoint into one slot. Only the selector thread mutates rooms/queues.
+        (probeIndex == 2 ? handler.pendingProbe2 : handler.pendingProbe1).set(probe);
     }
 
     void onReadable() throws IOException {
         if (closed) return;
-        touchActivity();
-
         if (relayDataMode) {
             relayReadable();
             return;
@@ -149,6 +157,7 @@ public class ClientHandler {
             } finally {
                 readBuf.compact();
             }
+            if (!readBuf.hasRemaining()) throw new IOException("Command buffer full");
             return;
         }
 
@@ -165,29 +174,30 @@ public class ClientHandler {
         } finally {
             readBuf.compact();
         }
+        if (!readBuf.hasRemaining()) throw new IOException("Command buffer full");
     }
 
     void onWritable() throws IOException {
         if (closed) return;
         while (!writeQ.isEmpty()) {
             ByteBuffer b = writeQ.peek();
-            int before = b.remaining();
             ch.write(b);
-            int written = before - b.remaining();
-            if (written > 0) {
-                pendingWriteBytes = Math.max(0, pendingWriteBytes - written);
-            }
             if (b.hasRemaining()) {
                 refreshInterestOps();
                 return;
             }
             writeQ.poll();
+            retainedWriteBytes -= b.capacity();
+            WRITE_BUDGET.release(b.capacity());
         }
         refreshInterestOps();
     }
 
     void onTick(long nowMillis) throws IOException {
         if (closed) return;
+        if (writeOverflow) throw new IOException("Slow client exceeded write budget");
+        applyProbe(pendingProbe1.getAndSet(null), 1);
+        applyProbe(pendingProbe2.getAndSet(null), 2);
         if (nowMillis - lastActiveAtMillis >= IDLE_TIMEOUT_MS) {
             Room room = currentRoom;
             if (room == null) {
@@ -211,6 +221,14 @@ public class ClientHandler {
     void close() {
         if (closed) return;
         closed = true;
+        for (ByteBuffer b; (b = writeQ.poll()) != null;) WRITE_BUDGET.release(b.capacity());
+        retainedWriteBytes = 0;
+        pendingProbe1.set(null);
+        pendingProbe2.set(null);
+        if (key != null) {
+            key.attach(null);
+            key.cancel();
+        }
         try {
             ch.close();
         } catch (IOException ignored) {
@@ -218,7 +236,6 @@ public class ClientHandler {
         AbuseGuard.closeConnection(remoteIp);
         unregisterProbeToken();
         cleanupOnDisconnect();
-        if (key != null) key.cancel();
     }
 
     boolean isClosed() {
@@ -226,8 +243,9 @@ public class ClientHandler {
     }
 
     private void drainSpectatorRelayInput() throws IOException {
-        ByteBuffer tmp = ByteBuffer.allocate(1024);
-        int n = ch.read(tmp);
+        readBuf.clear();
+        int n = ch.read(readBuf);
+        readBuf.clear();
         if (n < 0) throw new EOFException("Spectator disconnected");
         if (n > 0) touchActivity();
     }
@@ -238,13 +256,16 @@ public class ClientHandler {
 
     private void relayReadable() throws IOException {
         if (relayPeer == null || relayPeer.closed) throw new IOException("Relay peer closed");
-        ByteBuffer tmp = ByteBuffer.allocate(4096);
-        int n = ch.read(tmp);
+        readBuf.clear();
+        readBuf.limit(4096);
+        int n = ch.read(readBuf);
         if (n < 0) throw new EOFException("Relay closed");
         if (n == 0) return;
-        tmp.flip();
-        byte[] raw = new byte[tmp.remaining()];
-        tmp.get(raw);
+        touchActivity();
+        readBuf.flip();
+        byte[] raw = new byte[readBuf.remaining()];
+        readBuf.get(raw);
+        readBuf.clear();
         Room room = currentRoom;
         if (room != null) {
             AnalyticsCollector.onRelayPayload(room.getId(), raw);
@@ -1225,7 +1246,6 @@ public class ClientHandler {
         ensureWriteCapacity(b.remaining());
         writeQ.add(b);
         refreshInterestOps();
-        touchActivity();
     }
 
     private void enqueueRaw(byte[] raw) throws IOException {
@@ -1238,11 +1258,16 @@ public class ClientHandler {
     }
 
     private void ensureWriteCapacity(int addBytes) throws IOException {
-        if (pendingWriteBytes + addBytes > MAX_PENDING_WRITE_BYTES) {
-            throw new IOException("pending write queue overflow: " + (pendingWriteBytes + addBytes));
+        if (writeOverflow || retainedWriteBytes + addBytes > MAX_PENDING_WRITE_BYTES
+                || writeQ.size() >= MAX_PENDING_WRITE_BUFFERS || !WRITE_BUDGET.reserve(addBytes)) {
+            writeOverflow = true;
+            throw new IOException("Write queue budget exceeded");
         }
-        pendingWriteBytes += addBytes;
+        retainedWriteBytes += addBytes;
     }
+
+    static long queuedWriteBytes() { return WRITE_BUDGET.bytes(); }
+    static int queuedWriteBuffers() { return WRITE_BUDGET.buffers(); }
 
     private void refreshInterestOps() {
         if (key == null || !key.isValid()) return;
@@ -1271,9 +1296,10 @@ public class ClientHandler {
         }
     }
 
-    private synchronized void updateObservedEndpoint(Socket probeSocket, int probeIndex) {
-        String ip = probeSocket.getInetAddress().getHostAddress();
-        int port = probeSocket.getPort();
+    private void applyProbe(ObservedProbe probe, int probeIndex) {
+        if (probe == null || probe.token != probeToken) return;
+        String ip = probe.ip;
+        int port = probe.port;
         if (probeIndex == 2) {
             observedNatIp2 = ip;
             observedNatPort2 = port;
@@ -1284,6 +1310,8 @@ public class ClientHandler {
         sendRoomProbeState(currentRoom);
         maybeContinueReprobeP2P();
     }
+
+    private record ObservedProbe(int token, String ip, int port) {}
 
     private void maybeContinueReprobeP2P() {
         Room room = currentRoom;

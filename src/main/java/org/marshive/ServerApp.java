@@ -2,9 +2,8 @@ package org.marshive;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.BufferedReader;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -16,6 +15,7 @@ import java.nio.channels.SocketChannel;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.concurrent.ScheduledFuture;
 
 public class ServerApp {
     private static final int DEFAULT_BASE_PORT = 8888;
@@ -25,6 +25,7 @@ public class ServerApp {
     private static final long ROOM_CLEAN_INTERVAL_MS = 60_000L;
 
     public static void main(String[] args) throws Exception {
+        ServerHealth.installFailureHandler();
         int basePort = DEFAULT_BASE_PORT;
         int shardCount = DEFAULT_SHARD_COUNT;
         boolean dashboardEnabled = false;
@@ -59,42 +60,34 @@ public class ServerApp {
             shardCount = parseIntSafe(args[1].trim(), shardCount);
         }
 
-        if (shardCount <= 0) {
-            System.out.println("[FATAL] SHARD_COUNT must be > 0, got: " + shardCount);
-            return;
+        if (shardCount <= 0 || shardCount > 4) {
+            throw new IllegalArgumentException("SHARD_COUNT must be 1..4 (probe port ranges), got: " + shardCount);
         }
         if (basePort <= 0 || basePort > 65535) {
-            System.out.println("[FATAL] BASE_PORT must be 1..65535, got: " + basePort);
-            return;
+            throw new IllegalArgumentException("BASE_PORT must be 1..65535, got: " + basePort);
         }
         int lastPort = basePort + shardCount - 1;
         if (lastPort > 65535) {
-            System.out.println("[FATAL] Port range overflow: " + basePort + " ~ " + lastPort);
-            return;
+            throw new IllegalArgumentException("Port range overflow: " + lastPort);
         }
         int probeBasePort = basePort + 1000;
         int lastProbePort = probeBasePort + shardCount - 1;
         if (probeBasePort <= 0 || lastProbePort > 65535) {
-            System.out.println("[FATAL] Probe port range overflow: " + probeBasePort + " ~ " + lastProbePort);
-            return;
+            throw new IllegalArgumentException("Probe port range overflow: " + lastProbePort);
         }
         int metricsBasePort = basePort + 3000;
         int lastMetricsPort = metricsBasePort + shardCount - 1;
         if (metricsBasePort <= 0 || lastMetricsPort > 65535) {
-            System.out.println("[FATAL] Metrics port range overflow: "
-                    + metricsBasePort + " ~ " + lastMetricsPort);
-            return;
+            throw new IllegalArgumentException("Metrics port range overflow: " + lastMetricsPort);
         }
         int dashboardPort = basePort + 4000;
         if (dashboardPort <= 0 || dashboardPort > 65535) {
-            System.out.println("[FATAL] Dashboard port overflow: " + dashboardPort);
-            return;
+            throw new IllegalArgumentException("Dashboard port overflow: " + dashboardPort);
         }
         int probeBasePort2 = basePort + PROBE2_PORT_OFFSET;
         int lastProbePort2 = probeBasePort2 + shardCount - 1;
         if (probeBasePort2 <= 0 || lastProbePort2 > 65535) {
-            System.out.println("[FATAL] Probe2 port range overflow: " + probeBasePort2 + " ~ " + lastProbePort2);
-            return;
+            throw new IllegalArgumentException("Probe2 port range overflow: " + lastProbePort2);
         }
 
         System.out.println(">>> NIO Game Server Started on Ports: " +
@@ -132,6 +125,12 @@ public class ServerApp {
         }
 
         long lastRoomCleanAt = System.currentTimeMillis();
+        ServerHealth.startWatchdog();
+        System.out.println("[LIMITS] connections=" + ResourceLimits.MAX_CONNECTIONS
+                + " trackedIps=" + ResourceLimits.MAX_TRACKED_IPS
+                + " writeBytes=" + ResourceLimits.MAX_QUEUED_BYTES
+                + " settlementBytes=" + ResourceLimits.MAX_SETTLEMENT_BYTES
+                + " replicationBytes=" + ResourceLimits.MAX_REPLICATION_BYTES);
         while (true) {
             selector.select(500);
             long now = System.currentTimeMillis();
@@ -153,17 +152,20 @@ public class ServerApp {
                             ch.close();
                             continue;
                         }
-                        ClientHandler h;
+                        ClientHandler h = null;
                         try {
                             h = new ClientHandler(ch, rms[binding.shardId], binding.shardId, binding.probePort, binding.probePort2, remoteIp);
+                            SelectionKey clientKey = ch.register(selector, SelectionKey.OP_READ);
+                            h.key = clientKey;
+                            clientKey.attach(h);
                         } catch (IOException e) {
-                            AbuseGuard.closeConnection(remoteIp);
-                            ch.close();
+                            if (h != null) h.close();
+                            else {
+                                AbuseGuard.closeConnection(remoteIp);
+                                ch.close();
+                            }
                             continue;
                         }
-                        SelectionKey clientKey = ch.register(selector, SelectionKey.OP_READ);
-                        h.key = clientKey;
-                        clientKey.attach(h);
                     } else {
                         ClientHandler h = (ClientHandler) key.attachment();
                         if (h == null) continue;
@@ -200,9 +202,10 @@ public class ServerApp {
                 if (removedTotal > 0) {
                     System.out.println("[ROOM_CLEAN] removed stale rooms: " + removedTotal);
                 }
+                ServerHealth.logMemory(AbuseGuard.cleanup(now));
                 lastRoomCleanAt = now;
             }
-
+            ServerHealth.loopCompleted();
         }
     }
 
@@ -211,9 +214,9 @@ public class ServerApp {
             try (ServerSocket ss = new ServerSocket(probePort)) {
                 while (true) {
                     Socket s = ss.accept();
-                    s.setTcpNoDelay(true);
-                    s.setSoTimeout(1000);
                     try (Socket probeSocket = s) {
+                        s.setTcpNoDelay(true);
+                        s.setSoTimeout(1000);
                         InputStream in = probeSocket.getInputStream();
                         int token = Proto.readIntBE(in);
                         ClientHandler.acceptP2PProbe(token, probeSocket, probeIndex);
@@ -221,8 +224,7 @@ public class ServerApp {
                     }
                 }
             } catch (IOException e) {
-                System.out.println("[PROBE" + probeIndex + "@" + probePort + "] crashed: " + e.getMessage());
-                e.printStackTrace();
+                throw new UncheckedIOException("Probe listener failed on " + probePort, e);
             }
         }, (probeIndex == 1 ? "probe-" : "probe2-") + probePort);
         t.setDaemon(false);
@@ -244,18 +246,17 @@ public class ServerApp {
             try (ServerSocket ss = new ServerSocket(metricsPort)) {
                 while (true) {
                     Socket s = ss.accept();
-                    s.setTcpNoDelay(true);
+                    ScheduledFuture<?> deadline = ServerHealth.closeAfter(s, ResourceLimits.METRICS_TIMEOUT_MS);
                     try (Socket metricsSocket = s) {
-                        BufferedReader reader = new BufferedReader(new InputStreamReader(metricsSocket.getInputStream(), StandardCharsets.UTF_8));
+                        s.setTcpNoDelay(true);
                         OutputStream out = metricsSocket.getOutputStream();
-                        String req = reader.readLine();
+                        String req = BoundedLineReader.read(metricsSocket, ResourceLimits.MAX_SETTLEMENT_BYTES,
+                                ResourceLimits.METRICS_TIMEOUT_MS);
+                        if (req == null) continue;
                         String resp;
                         if (req != null && req.startsWith("SETTLE|")) {
                             String ret = AnalyticsCollector.ingestSettlement(req);
                             resp = ret + "\n";
-                            if ("OK".equals(ret) || "OK_DUP".equals(ret)) {
-                                DashboardServer.notifyDataUpdated();
-                            }
                             if (SettlementReplicator.isEnabled() && ("OK".equals(ret) || "OK_DUP".equals(ret))) {
                                 SettlementReplicator.onAcceptedSettlementLine(req);
                             }
@@ -266,11 +267,12 @@ public class ServerApp {
                         out.write(payload);
                         out.flush();
                     } catch (IOException ignored) {
+                    } finally {
+                        deadline.cancel(false);
                     }
                 }
             } catch (IOException e) {
-                System.out.println("[METRICS@" + metricsPort + "] crashed: " + e.getMessage());
-                e.printStackTrace();
+                throw new UncheckedIOException("Metrics listener failed on " + metricsPort, e);
             }
         }, "metrics-" + metricsPort);
         t.setDaemon(false);

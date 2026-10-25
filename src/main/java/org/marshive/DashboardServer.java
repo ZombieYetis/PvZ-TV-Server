@@ -16,31 +16,36 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 final class DashboardServer {
     private static final String DB_URL = "jdbc:sqlite:data/pvz_metrics.db";
     private static final int SUNFLOWER_SEED = 1;
     private static final int GRAVESTONE_SEED = 61;
-    private static final CopyOnWriteArrayList<OutputStream> STREAM_CLIENTS = new CopyOnWriteArrayList<>();
 
     private DashboardServer() {
     }
 
     static void start(int port) throws IOException {
-        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        // Set before HttpServer initializes its configuration. Operators can override with -D.
+        defaultProperty("jdk.httpserver.maxConnections", "128");
+        defaultProperty("sun.net.httpserver.maxIdleConnections", "32");
+        defaultProperty("sun.net.httpserver.maxReqTime", "10");
+        defaultProperty("sun.net.httpserver.maxRspTime", "30");
+        defaultProperty("sun.net.httpserver.maxReqHeaders", "64");
+        defaultProperty("sun.net.httpserver.maxReqHeaderSize", "16384");
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 64);
         server.createContext("/", new IndexHandler());
         server.createContext("/api/top-decks", new TopDecksHandler());
         server.createContext("/api/card-stats", new CardStatsHandler());
         server.createContext("/api/recent-matches", new RecentMatchesHandler());
         server.createContext("/api/seed-names", new SeedNamesHandler());
         server.createContext("/api/stream", new StreamHandler());
-        server.setExecutor(
-                Executors.newFixedThreadPool(
-                        Math.max(4, Runtime.getRuntime().availableProcessors())
-                )
-        );
+        int workers = Math.max(4, Math.min(16, Runtime.getRuntime().availableProcessors()));
+        server.setExecutor(new ThreadPoolExecutor(workers, workers, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(128), new ThreadPoolExecutor.AbortPolicy()));
         server.start();
         System.out.println("[DASHBOARD] http://0.0.0.0:" + port + "/");
 
@@ -56,6 +61,10 @@ final class DashboardServer {
         }, "pvz-metrics-init");
         metricsInitThread.setDaemon(true);
         metricsInitThread.start();
+    }
+
+    private static void defaultProperty(String key, String value) {
+        if (System.getProperty(key) == null) System.setProperty(key, value);
     }
 
     private static final class IndexHandler implements HttpHandler {
@@ -146,38 +155,10 @@ final class DashboardServer {
                 writeText(exchange, 405, "Method Not Allowed", "text/plain; charset=utf-8");
                 return;
             }
-            exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
             exchange.getResponseHeaders().set("Cache-Control", "no-cache");
-            exchange.getResponseHeaders().set("Connection", "keep-alive");
-            exchange.sendResponseHeaders(200, 0);
-            OutputStream os = exchange.getResponseBody();
-            STREAM_CLIENTS.add(os);
-            try {
-                os.write("event: hello\ndata: ok\n\n".getBytes(StandardCharsets.UTF_8));
-                os.flush();
-            } catch (IOException e) {
-                STREAM_CLIENTS.remove(os);
-                try {
-                    os.close();
-                } catch (IOException ignored) {
-                }
-            }
-        }
-    }
-
-    static void notifyDataUpdated() {
-        byte[] payload = "event: settle\ndata: 1\n\n".getBytes(StandardCharsets.UTF_8);
-        for (OutputStream os : STREAM_CLIENTS) {
-            try {
-                os.write(payload);
-                os.flush();
-            } catch (IOException e) {
-                STREAM_CLIENTS.remove(os);
-                try {
-                    os.close();
-                } catch (IOException ignored) {
-                }
-            }
+            // EventSource reconnects after 15 s. No retained streams or writes on metrics threads.
+            writeText(exchange, 200, "retry: 15000\nevent: settle\ndata: 1\n\n",
+                    "text/event-stream; charset=utf-8");
         }
     }
 
@@ -339,7 +320,7 @@ final class DashboardServer {
                         "  WHERE (a.picked+a.banned+a.won)>0" +
                         ")" +
                         "SELECT seed_type, picked, banned, won, win_rate, pick_rate, ban_rate, target_rate " +
-                        "FROM calc ORDER BY win_rate DESC, pick_rate DESC, ban_rate DESC, target_rate DESC, seed_type";
+                        "FROM calc ORDER BY win_rate DESC, pick_rate DESC, ban_rate DESC, target_rate DESC, seed_type LIMIT 4096";
 
         StringBuilder sb = new StringBuilder();
         sb.append("{\"items\":[");

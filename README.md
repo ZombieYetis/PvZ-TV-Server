@@ -58,6 +58,8 @@ java -jar PvZ-TV-Server.jar --base=26667 --replicate_to=IP:PORT
 
 ## 参数说明
 
+长期运行的内存保护、自动清理规则及 Linux 故障自动重启配置见 [部署说明](deploy/README.md)。systemd 模板位于 [deploy/pvz-tv-server.service](deploy/pvz-tv-server.service)，JVM 和服务器参数位于 [deploy/pvz-tv-server.env](deploy/pvz-tv-server.env)。
+
 | 参数               | 说明 | 示例                              |
 |------------------|---|---------------------------------|
 | `--base`         | 服务器监听端口 | `--base=26667`                  |

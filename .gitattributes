@@ -1,0 +1,2 @@
+deploy/*.service text eol=lf
+deploy/*.env text eol=lf

@@ -1,0 +1,35 @@
+[Unit]
+Description=PvZ TV multiplayer server
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pvz-server
+Group=pvz-server
+StateDirectory=pvz-tv-server
+LogsDirectory=pvz-tv-server
+WorkingDirectory=/var/lib/pvz-tv-server
+EnvironmentFile=/etc/pvz-tv-server.env
+ExecStart=/usr/bin/java $JAVA_OPTS -jar /opt/pvz-tv-server/PvZ-TV-server.jar $SERVER_OPTS
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillMode=control-group
+OOMPolicy=kill
+# Example for a 512 MiB Java heap; increase together with -Xmx when needed.
+MemoryMax=1G
+LimitNOFILE=8192
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pvz-tv-server
+
+[Install]
+WantedBy=multi-user.target
