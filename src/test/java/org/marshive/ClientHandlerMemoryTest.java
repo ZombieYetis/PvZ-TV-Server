@@ -3,6 +3,8 @@ package org.marshive;
 import org.junit.After;
 import org.junit.Test;
 import java.io.IOException;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.*;
@@ -10,6 +12,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.nio.channels.spi.SelectorProvider;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import static org.junit.Assert.*;
@@ -121,10 +124,110 @@ public class ClientHandlerMemoryTest {
         }
     }
 
+    private Room gameRoom(ClientHandler host, ClientHandler guest, boolean negotiating) throws Exception {
+        Room room = new Room(123, "protocol-test", host, 3154);
+        room.setGuest(guest);
+        room.setGaming(true);
+        room.setP2pNegotiating(negotiating);
+        var currentRoom = ClientHandler.class.getDeclaredField("currentRoom");
+        currentRoom.setAccessible(true);
+        currentRoom.set(host, room);
+        currentRoom.set(guest, room);
+        var isHost = ClientHandler.class.getDeclaredField("isHost");
+        isHost.setAccessible(true);
+        isHost.setBoolean(host, true);
+        return room;
+    }
+
+    private static byte[] repeatedCommand(byte command, int count) {
+        byte[] bytes = new byte[count];
+        Arrays.fill(bytes, command);
+        return bytes;
+    }
+
+    @Test public void duplicateP2pAcknowledgementsLogOnceAndDoNotResetTheHandshake() throws Exception {
+        TestChannel hostChannel = new TestChannel();
+        TestChannel guestChannel = new TestChannel();
+        ClientHandler host = handler(hostChannel);
+        ClientHandler guest = handler(guestChannel);
+        Room room = gameRoom(host, guest, true);
+        PrintStream original = System.out;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        try (PrintStream output = new PrintStream(captured)) {
+            System.setOut(output);
+            hostChannel.inbound = ByteBuffer.wrap(repeatedCommand(MsgType.P2P_OK.code, 100));
+            host.onReadable();
+            assertTrue(room.isHostP2pOk());
+            assertFalse(room.isGuestP2pOk());
+            assertFalse(room.isP2pEstablished());
+            hostChannel.inbound = ByteBuffer.wrap(new byte[]{MsgType.START.code});
+            host.onReadable();
+            assertTrue(room.isHostP2pOk());
+            guestChannel.inbound = ByteBuffer.wrap(new byte[]{MsgType.P2P_OK.code});
+            guest.onReadable();
+            assertTrue(room.isP2pEstablished());
+            hostChannel.inbound = ByteBuffer.wrap(new byte[]{MsgType.P2P_OK.code});
+            host.onReadable();
+            assertEquals(2, captured.toString().lines().filter(line -> line.startsWith("[P2P_OK]")).count());
+            assertEquals(1, captured.toString().lines().filter(line -> line.startsWith("[GAME_MODE]")).count());
+        } finally {
+            System.setOut(original);
+        }
+    }
+
+    @Test public void p2pAcknowledgementsDuringRelayDoNotChangeStateOrProduceLogs() throws Exception {
+        TestChannel channel = new TestChannel();
+        ClientHandler host = handler(channel);
+        Room room = gameRoom(host, handler(new TestChannel()), false);
+        room.setRelayMode(true);
+        PrintStream original = System.out;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        try (PrintStream output = new PrintStream(captured)) {
+            System.setOut(output);
+            channel.inbound = ByteBuffer.wrap(repeatedCommand(MsgType.P2P_OK.code, 100));
+            host.onReadable();
+            assertFalse(room.isHostP2pOk());
+            assertTrue(room.isRelayMode());
+            assertEquals(0, captured.size());
+            assertEquals(0, ClientHandler.queuedWriteBytes());
+        } finally {
+            System.setOut(original);
+        }
+    }
+
+    @Test public void oversizedControlBurstIsRejectedBeforeItCanMonopolizeTheLoop() throws Exception {
+        TestChannel channel = new TestChannel();
+        ClientHandler host = handler(channel);
+        Room room = gameRoom(host, handler(new TestChannel()), false);
+        room.setRelayMode(true);
+        channel.inbound = ByteBuffer.wrap(repeatedCommand(MsgType.P2P_OK.code, 65536));
+        IOException error = assertThrows(IOException.class, host::onReadable);
+        assertEquals("Control command burst exceeded", error.getMessage());
+        assertFalse(room.isHostP2pOk());
+    }
+
+    @Test public void manySmallReadsCannotBypassTheControlRateLimit() throws Exception {
+        TestChannel channel = new TestChannel();
+        ClientHandler host = handler(channel);
+        gameRoom(host, handler(new TestChannel()), false).setRelayMode(true);
+        // Keep the test within one window even on a paused CI runner.
+        var start = ClientHandler.class.getDeclaredField("controlWindowStartedNanos");
+        start.setAccessible(true);
+        start.setLong(host, System.nanoTime() + 60_000_000_000L);
+        for (int i = 0; i < 4; i++) {
+            channel.inbound = ByteBuffer.wrap(repeatedCommand(MsgType.P2P_OK.code, 64));
+            host.onReadable();
+        }
+        channel.inbound = ByteBuffer.wrap(new byte[]{MsgType.P2P_OK.code});
+        IOException error = assertThrows(IOException.class, host::onReadable);
+        assertEquals("Control command rate exceeded", error.getMessage());
+    }
+
     /** A controllable nonblocking socket makes partial-write tests deterministic. */
     private static final class TestChannel extends SocketChannel {
         private final Socket socket = new Socket();
         int writeQuota;
+        ByteBuffer inbound = ByteBuffer.allocate(0);
         TestChannel() { super(SelectorProvider.provider()); }
         @Override public int write(ByteBuffer src) {
             int count = Math.min(writeQuota, src.remaining());
@@ -132,7 +235,11 @@ public class ClientHandlerMemoryTest {
             writeQuota -= count;
             return count;
         }
-        @Override public int read(ByteBuffer dst) { return 0; }
+        @Override public int read(ByteBuffer dst) {
+            int count = Math.min(dst.remaining(), inbound.remaining());
+            for (int i = 0; i < count; i++) dst.put(inbound.get());
+            return count;
+        }
         @Override public long read(ByteBuffer[] dsts, int offset, int length) { return 0; }
         @Override public long write(ByteBuffer[] srcs, int offset, int length) {
             long count = 0;

@@ -39,6 +39,8 @@ public class ClientHandler {
     static final long IDLE_TIMEOUT_MS = 10 * 60 * 1000L;
     static final long P2P_FALLBACK_MS = 5000L;
     private static final int MAX_BAD_COMMANDS = 5;
+    private static final int MAX_CONTROL_COMMANDS_PER_READ = 128;
+    private static final int MAX_CONTROL_COMMANDS_PER_SECOND = 256;
     private static final int MAX_PENDING_WRITE_BYTES = 1024 * 1024;
     private static final int MAX_PENDING_WRITE_BUFFERS = 4096;
     private static final BufferBudget WRITE_BUDGET = new BufferBudget(
@@ -81,6 +83,8 @@ public class ClientHandler {
     private boolean spectatorStreamRequested = false;
     private boolean spectatorRelayOpen = false;
     private int badCommandCount = 0;
+    private long controlWindowStartedNanos = System.nanoTime();
+    private int controlCommandsInWindow;
     private int retainedWriteBytes = 0;
     private boolean writeOverflow;
 
@@ -151,9 +155,7 @@ public class ClientHandler {
             touchActivity();
             readBuf.flip();
             try {
-                while (tryConsumeOneCommand()) {
-                    // Spectators in battle only send explicit control commands.
-                }
+                consumeControlCommands();
             } finally {
                 readBuf.compact();
             }
@@ -168,9 +170,7 @@ public class ClientHandler {
         touchActivity();
         readBuf.flip();
         try {
-            while (tryConsumeOneCommand()) {
-                // parse as much as possible
-            }
+            consumeControlCommands();
         } finally {
             readBuf.compact();
         }
@@ -347,12 +347,32 @@ public class ClientHandler {
         spectatorRelayAssembleLen = 0;
     }
 
+    private void consumeControlCommands() throws IOException {
+        int processed = 0;
+        while (readBuf.hasRemaining()) {
+            if (processed >= MAX_CONTROL_COMMANDS_PER_READ) {
+                throw new IOException("Control command burst exceeded");
+            }
+            if (!tryConsumeOneCommand()) break;
+            processed++;
+        }
+    }
+
     private boolean tryConsumeOneCommand() throws IOException {
         int startPos = readBuf.position();
         if (readBuf.remaining() < 1) return false;
+        long now = System.nanoTime();
+        if (now - controlWindowStartedNanos >= 1_000_000_000L) {
+            controlWindowStartedNanos = now;
+            controlCommandsInWindow = 0;
+        }
+        if (controlCommandsInWindow >= MAX_CONTROL_COMMANDS_PER_SECOND) {
+            throw new IOException("Control command rate exceeded");
+        }
         byte tb = readBuf.get();
         MsgType type = MsgType.fromByte(tb);
         if (type == null) {
+            controlCommandsInWindow++;
             badCommandCount++;
             sendError(ERR_BAD_REQ);
             if (badCommandCount >= MAX_BAD_COMMANDS) {
@@ -364,6 +384,7 @@ public class ClientHandler {
             readBuf.position(startPos);
             return false;
         }
+        controlCommandsInWindow++;
         badCommandCount = 0;
         touchActivity();
         return true;
@@ -572,6 +593,8 @@ public class ClientHandler {
             sendError(ERR_NOT_READY);
             return;
         }
+        // Repeated START must not reset an active handshake or an established game.
+        if (currentRoom.isGaming()) return;
 
         synchronized (currentRoom) {
             currentRoom.setGaming(true);
@@ -876,6 +899,10 @@ public class ClientHandler {
         }
 
         Room room = currentRoom;
+        // Late/duplicate acknowledgements are harmless. Never log or mutate relay state for them.
+        if (!room.isP2pNegotiating() || room.isRelayMode() || room.isP2pEstablished()) return;
+        if ((room.getHost() == this && room.isHostP2pOk())
+                || (room.getGuest() == this && room.isGuestP2pOk())) return;
         boolean bothReady = room.markP2pOk(this);
         System.out.println("[P2P_OK][shard=" + shardId + "][room=" + room.getId() + "] from="
                 + (isHost ? "HOST" : "GUEST")

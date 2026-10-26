@@ -45,6 +45,8 @@ public class ServerIntegrationTest {
             assertTrue(stream.contains("retry: 15000"));
             assertTrue(stream.contains("event: settle"));
             assertTrue(httpGet(base + 4000, "/api/recent-matches").contains("Test"));
+            verifyExtendedCardStatistics(base);
+            rejectControlFlood(base);
             relayRoundTrip(base);
             query(base);
             assertTrue(process.isAlive());
@@ -55,6 +57,56 @@ public class ServerIntegrationTest {
             process.destroyForcibly();
             assertTrue(process.waitFor(10, TimeUnit.SECONDS));
         }
+    }
+
+    private void rejectControlFlood(int base) throws Exception {
+        try (Socket host = connect(base); Socket guest = connect(base)) {
+            host.getOutputStream().write(ByteBuffer.allocate(7).put((byte) 1).put((byte) 1)
+                    .put((byte) 'F').putInt(3154).array());
+            int room = ByteBuffer.wrap(frame(host, 0x81)).getInt();
+            guest.getOutputStream().write(ByteBuffer.allocate(11).put((byte) 3).putInt(room)
+                    .putInt(3154).put((byte) 1).put((byte) 'G').array());
+            assertEquals(1, frame(guest, 0x83)[0]);
+            host.getOutputStream().write(5);
+            frame(host, 0x85);
+            frame(guest, 0x85);
+            // Reproduce the observed invalid P2P_OK stream while waiting for relay readiness.
+            byte[] flood = new byte[4096];
+            Arrays.fill(flood, (byte) 0x09);
+            host.getOutputStream().write(flood);
+            try {
+                assertEquals(-1, host.getInputStream().read());
+            } catch (SocketException expectedReset) {
+                // Closing with unread input may reset instead of sending EOF.
+            }
+            query(base);
+        }
+    }
+
+    private void verifyExtendedCardStatistics(int base) throws Exception {
+        // Without external language files, the existing loader falls back to English keys.
+        String names = httpGet(base + 4000, "/api/seed-names");
+        assertTrue(names.contains("\"seed_type\":209,\"en\":\"ENDURIAN\",\"zh\":\"ENDURIAN\""));
+        assertTrue(names.contains("\"seed_type\":102,\"en\":\"CROSSING_GUARD_ZOMBIE\",\"zh\":\"CROSSING_GUARD_ZOMBIE\""));
+        for (int excluded : new int[]{105, 106, 107, 108, 109, 110, 211, 212}) {
+            assertFalse(names.contains("\"seed_type\":" + excluded + ","));
+        }
+
+        // Use deliberately reversed side labels to verify classification by the game's card IDs.
+        String events = "0,Z,K,209;1,Z,K,210;2,Z,K,1;3,Z,K,2;4,Z,K,0;"
+                + "5,P,K,102;6,P,K,103;7,P,K,104;8,P,K,62;9,P,K,64";
+        String meta = "bg=0&addon_ep=0&addon_bp=1&addon_ban=0&plant_use=209:3,210:2&zombie_use=102:3,103:2";
+        assertEquals("OK", metrics(base, "SETTLE|extended-cards|2|PLANT_WIN|100|" + events + "|" + meta + "\n"));
+        String filters = "&extra_packet=false&balance_patch=true&ban_mode=false&mode=DAY";
+        String plants = httpGet(base + 4000, "/api/card-stats?side=PLANT" + filters);
+        String zombies = httpGet(base + 4000, "/api/card-stats?side=ZOMBIE" + filters);
+        assertTrue(plants.contains("\"seed_en\":\"RED_STINGER\""));
+        assertFalse(plants.contains("\"seed_type\":102,"));
+        assertTrue(zombies.contains("\"seed_en\":\"SCIENTIST_ZOMBIE\""));
+        assertTrue(zombies.contains("\"seed_en\":\"GRAVEDIGGER_ZOMBIE\""));
+        assertFalse(zombies.contains("\"seed_type\":209,"));
+        String decks = httpGet(base + 4000, "/api/top-decks?side=PLANT" + filters);
+        assertTrue(decks.contains("\"core_en\":\"ENDURIANRED_STINGER\""));
     }
 
     private void relayRoundTrip(int base) throws Exception {
