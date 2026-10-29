@@ -98,9 +98,11 @@ final class AnalyticsCollector {
         }
     }
 
-    private static SettlementMeta parseMeta(String raw) {
+    static SettlementMeta parseMeta(String raw) {
         SettlementMeta m = new SettlementMeta();
         if (raw == null || raw.isEmpty()) return m;
+        String gameMode = null;
+        String netplayVersion = null;
         String[] items = raw.split("&");
         for (String kv : items) {
             if (kv == null || kv.isEmpty()) continue;
@@ -118,6 +120,12 @@ final class AnalyticsCollector {
                         break;
                     case "shuffle":
                         m.shuffleMode = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "game_mode":
+                        gameMode = v.toUpperCase(Locale.ROOT);
+                        break;
+                    case "netplay_version":
+                        netplayVersion = v;
                         break;
                     case "addon_ep":
                         m.addonExtraPackets = "1".equals(v);
@@ -161,7 +169,34 @@ final class AnalyticsCollector {
             } catch (Exception ignored) {
             }
         }
+        if (netplayVersion != null) m.netplayVersion = parseNetplayVersion(netplayVersion);
+        if (gameMode != null) {
+            if (!Set.of("NORMAL", "SHUFFLE", "CLASSIC").contains(gameMode)) {
+                throw new IllegalArgumentException("Invalid game_mode: " + gameMode);
+            }
+            m.gameMode = gameMode;
+            m.shuffleMode = "SHUFFLE".equals(gameMode);
+            // New clients send the ruleset instead of independent feature switches.
+            // Override legacy fields even if they appeared later in the payload.
+            m.addonExtraSeeds = !"CLASSIC".equals(gameMode);
+            m.addonBalancePatch = m.addonExtraSeeds;
+        } else {
+            // Preserve the flags reported by older clients and their existing records.
+            m.gameMode = m.shuffleMode ? "SHUFFLE" : "NORMAL";
+        }
         return m;
+    }
+
+    static long parseNetplayVersion(String raw) {
+        if (raw == null || !raw.matches("[0-9]{1,10}")) {
+            throw new IllegalArgumentException("Invalid netplay_version");
+        }
+        long version = Long.parseLong(raw);
+        // NETPLAY_VERSION is uint32_t in the game. Zero is reserved for old, unversioned data.
+        if (version < 1 || version > 0xffff_ffffL) {
+            throw new IllegalArgumentException("Invalid netplay_version");
+        }
+        return version;
     }
 
     private static void parseUsage(String raw, String side, List<CardUsage> out) {
@@ -383,6 +418,8 @@ final class AnalyticsCollector {
         int background = -1;
         int battleType = -1;
         boolean shuffleMode;
+        String gameMode = "NORMAL";
+        long netplayVersion;
         boolean addonExtraPackets;
         boolean addonExtraSeeds;
         boolean addonBanMode;

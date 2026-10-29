@@ -42,6 +42,7 @@ final class DashboardServer {
         server.createContext("/api/card-stats", new CardStatsHandler());
         server.createContext("/api/recent-matches", new RecentMatchesHandler());
         server.createContext("/api/seed-names", new SeedNamesHandler());
+        server.createContext("/api/versions", new VersionsHandler());
         server.createContext("/api/stream", new StreamHandler());
         int workers = Math.max(4, Math.min(16, Runtime.getRuntime().availableProcessors()));
         server.setExecutor(new ThreadPoolExecutor(workers, workers, 0L, TimeUnit.MILLISECONDS,
@@ -88,10 +89,11 @@ final class DashboardServer {
             String rawQuery = exchange.getRequestURI().getRawQuery();
             String side = normalizeSide(queryParam(rawQuery, "side"));
             String extraPacket = normalizeBoolDefault(queryParam(rawQuery, "extra_packet"), false);
-            String balancePatch = normalizeBoolDefault(queryParam(rawQuery, "balance_patch"), true);
             String banMode = normalizeBoolDefault(queryParam(rawQuery, "ban_mode"), false);
             String modeFilter = normalizeMapFilter(queryParam(rawQuery, "mode"));
-            writeText(exchange, 200, queryTopDecksJson(side, extraPacket, balancePatch, banMode, modeFilter), "application/json; charset=utf-8");
+            long version = readVersionFilter(exchange);
+            if (version < 0) return;
+            writeText(exchange, 200, queryTopDecksJson(side, extraPacket, banMode, modeFilter, version), "application/json; charset=utf-8");
         }
     }
 
@@ -105,10 +107,11 @@ final class DashboardServer {
             String rawQuery = exchange.getRequestURI().getRawQuery();
             String side = normalizeSide(queryParam(rawQuery, "side"));
             String extraPacket = normalizeBoolDefault(queryParam(rawQuery, "extra_packet"), false);
-            String balancePatch = normalizeBoolDefault(queryParam(rawQuery, "balance_patch"), true);
             String banMode = normalizeBoolDefault(queryParam(rawQuery, "ban_mode"), false);
             String modeFilter = normalizeMapFilter(queryParam(rawQuery, "mode"));
-            writeText(exchange, 200, queryCardStatsJson(side, extraPacket, balancePatch, banMode, modeFilter), "application/json; charset=utf-8");
+            long version = readVersionFilter(exchange);
+            if (version < 0) return;
+            writeText(exchange, 200, queryCardStatsJson(side, extraPacket, banMode, modeFilter, version), "application/json; charset=utf-8");
         }
     }
 
@@ -144,7 +147,37 @@ final class DashboardServer {
                 writeText(exchange, 405, "{\"error\":\"method_not_allowed\"}", "application/json; charset=utf-8");
                 return;
             }
-            writeText(exchange, 200, queryRecentMatchesJson(), "application/json; charset=utf-8");
+            long version = readVersionFilter(exchange);
+            if (version < 0) return;
+            writeText(exchange, 200, queryRecentMatchesJson(version), "application/json; charset=utf-8");
+        }
+    }
+
+    private static final class VersionsHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                writeText(exchange, 405, "{\"error\":\"method_not_allowed\"}", "application/json; charset=utf-8");
+                return;
+            }
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            String sql = "SELECT DISTINCT netplay_version FROM match_results "
+                    + "WHERE game_mode='NORMAL' AND netplay_version>0 ORDER BY netplay_version DESC LIMIT 2";
+            StringBuilder json = new StringBuilder("{\"items\":[");
+            try (Connection conn = DriverManager.getConnection(DB_URL);
+                 PreparedStatement ps = conn.prepareStatement(sql);
+                 ResultSet rs = ps.executeQuery()) {
+                boolean first = true;
+                while (rs.next()) {
+                    if (!first) json.append(',');
+                    first = false;
+                    json.append(rs.getLong("netplay_version"));
+                }
+            } catch (SQLException e) {
+                writeText(exchange, 503, "{\"error\":\"versions_unavailable\"}", "application/json; charset=utf-8");
+                return;
+            }
+            writeText(exchange, 200, json.append("]}").toString(), "application/json; charset=utf-8");
         }
     }
 
@@ -162,13 +195,15 @@ final class DashboardServer {
         }
     }
 
-    private static String queryTopDecksJson(String side, String extraPacket, String balancePatch, String banMode, String modeFilter) {
-        int totalPlays = queryTotalDeckMatchesByFilter(side, extraPacket, balancePatch, banMode, modeFilter);
+    // Shuffle and classic settlements are retained in the database, but never displayed here.
+    private static String queryTopDecksJson(String side, String extraPacket, String banMode, String modeFilter, long version) {
+        int totalPlays = queryTotalDeckMatchesByFilter(side, extraPacket, banMode, modeFilter, version);
         final String sql =
                 "WITH scoped AS (" +
                         "  SELECT d.match_id, d.side, d.deck_ids " +
                         "  FROM match_decks d JOIN match_results r ON r.id=d.match_id " +
-                        "  WHERE d.side=? AND r.extra_packet=? AND r.balance_patch=? AND r.ban_mode=? AND r.bg=? AND d.deck_ids<>''" +
+                        "  WHERE d.side=? AND r.extra_packet=? AND r.game_mode='NORMAL' AND r.ban_mode=? AND r.bg=? AND d.deck_ids<>''" +
+                        versionCondition(version) +
                         "), scored AS (" +
                         "  SELECT d.side, d.deck_ids, COUNT(*) AS plays," +
                         "         SUM(CASE WHEN (d.side='PLANT' AND r.winner='PLANT') OR (d.side='ZOMBIE' AND r.winner='ZOMBIE') THEN 1 ELSE 0 END) AS wins" +
@@ -188,14 +223,14 @@ final class DashboardServer {
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, side);
             ps.setString(2, extraPacket);
-            ps.setString(3, balancePatch);
-            ps.setString(4, banMode);
-            ps.setString(5, modeFilter);
+            ps.setString(3, banMode);
+            ps.setString(4, modeFilter);
+            if (version > 0) ps.setLong(5, version);
 
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     String deckIds = rs.getString("deck_ids");
-                    CoreNames core = coreNameFromUsage(conn, side, deckIds, extraPacket, balancePatch, banMode, modeFilter);
+                    CoreNames core = coreNameFromUsage(conn, side, deckIds, extraPacket, banMode, modeFilter, version);
                     String coreZh = core.zh;
                     String coreEn = core.en;
                     if (!first) sb.append(',');
@@ -216,7 +251,7 @@ final class DashboardServer {
         return sb.toString();
     }
 
-    private static CoreNames coreNameFromUsage(Connection conn, String side, String deckIds, String extraPacket, String balancePatch, String banMode, String modeFilter) {
+    private static CoreNames coreNameFromUsage(Connection conn, String side, String deckIds, String extraPacket, String banMode, String modeFilter, long version) {
         boolean zombie = "ZOMBIE".equals(side);
         List<Integer> deckSeedIds = parseDeckIds(deckIds);
         List<Integer> candidates = new ArrayList<>();
@@ -232,7 +267,8 @@ final class DashboardServer {
                 "WITH decks AS (" +
                         "  SELECT d.match_id, d.side, d.deck_ids " +
                         "  FROM match_decks d JOIN match_results r ON r.id=d.match_id " +
-                        "  WHERE d.side=? AND r.extra_packet=? AND r.balance_patch=? AND r.ban_mode=? AND r.bg=? AND d.deck_ids=?" +
+                        "  WHERE d.side=? AND r.extra_packet=? AND r.game_mode='NORMAL' AND r.ban_mode=? AND r.bg=? AND d.deck_ids=?" +
+                        versionCondition(version) +
                         "), agg AS (" +
                         "  SELECT u.seed_type, SUM(u.use_count) AS total_use " +
                         "  FROM match_card_usage u JOIN decks d ON d.match_id=u.match_id AND d.side=u.side " +
@@ -244,15 +280,16 @@ final class DashboardServer {
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, side);
             ps.setString(2, extraPacket);
-            ps.setString(3, balancePatch);
-            ps.setString(4, banMode);
-            ps.setString(5, modeFilter);
-            ps.setString(6, deckIds);
-            ps.setString(7, side);
-            ps.setString(8, deckIds);
-            ps.setString(9, side);
-            ps.setInt(10, SUNFLOWER_SEED);
-            ps.setInt(11, GRAVESTONE_SEED);
+            ps.setString(3, banMode);
+            ps.setString(4, modeFilter);
+            ps.setString(5, deckIds);
+            int next = 6;
+            if (version > 0) ps.setLong(next++, version);
+            ps.setString(next++, side);
+            ps.setString(next++, deckIds);
+            ps.setString(next++, side);
+            ps.setInt(next++, SUNFLOWER_SEED);
+            ps.setInt(next, GRAVESTONE_SEED);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     int seed = rs.getInt("seed_type");
@@ -281,7 +318,7 @@ final class DashboardServer {
         return new CoreNames(aZh + bZh, aEn + bEn);
     }
 
-    private static String queryCardStatsJson(String side, String extraPacket, String balancePatch, String banMode, String modeFilter) {
+    private static String queryCardStatsJson(String side, String extraPacket, String banMode, String modeFilter, long version) {
         final String sql =
                 "WITH scoped AS (" +
                         "  SELECT e.match_id, e.seed_type, " +
@@ -295,9 +332,10 @@ final class DashboardServer {
                         "      OR (?='PLANT' AND (e.seed_type < " + SeedTypeNames.ZOMBIE_SEED_START +
                         "                         OR e.seed_type >= " + SeedTypeNames.CUSTOM_PLANT_SEED_START + "))) " +
                         "    AND r.extra_packet=? " +
-                        "    AND r.balance_patch=? " +
+                        "    AND r.game_mode='NORMAL' " +
                         "    AND r.ban_mode=? " +
-                        "    AND r.bg=? AND r.game_mode IN ('NORMAL','UNKNOWN') " +
+                        "    AND r.bg=? " +
+                        versionCondition(version) +
                         "), per_match AS (" +
                         "  SELECT DISTINCT match_id, seed_type, side, event_type, winner FROM scoped " +
                         "), totals AS (" +
@@ -330,9 +368,9 @@ final class DashboardServer {
             ps.setString(1, side);
             ps.setString(2, side);
             ps.setString(3, extraPacket);
-            ps.setString(4, balancePatch);
-            ps.setString(5, banMode);
-            ps.setString(6, modeFilter);
+            ps.setString(4, banMode);
+            ps.setString(5, modeFilter);
+            if (version > 0) ps.setLong(6, version);
 
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -358,22 +396,25 @@ final class DashboardServer {
         return sb.toString();
     }
 
-    private static String queryRecentMatchesJson() {
-        final String sql = "SELECT finished_at, winner, plant_name, zombie_name, duration_text FROM match_results ORDER BY id DESC LIMIT 20";
+    private static String queryRecentMatchesJson(long version) {
+        final String sql = "SELECT finished_at, winner, plant_name, zombie_name, duration_text FROM match_results r "
+                + "WHERE game_mode='NORMAL'" + versionCondition(version) + " ORDER BY id DESC LIMIT 20";
         StringBuilder sb = new StringBuilder();
         sb.append("{\"items\":[");
         boolean first = true;
         try (Connection conn = DriverManager.getConnection(DB_URL);
-             PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                if (!first) sb.append(',');
-                first = false;
-                sb.append("{\"finished_at\":\"").append(jsonEscape(rs.getString("finished_at"))).append("\",")
-                        .append("\"winner\":\"").append(jsonEscape(rs.getString("winner"))).append("\",")
-                        .append("\"plant_name\":\"").append(jsonEscape(rs.getString("plant_name"))).append("\",")
-                        .append("\"zombie_name\":\"").append(jsonEscape(rs.getString("zombie_name"))).append("\",")
-                        .append("\"duration\":\"").append(jsonEscape(rs.getString("duration_text"))).append("\"}");
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (version > 0) ps.setLong(1, version);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    if (!first) sb.append(',');
+                    first = false;
+                    sb.append("{\"finished_at\":\"").append(jsonEscape(rs.getString("finished_at"))).append("\",")
+                            .append("\"winner\":\"").append(jsonEscape(rs.getString("winner"))).append("\",")
+                            .append("\"plant_name\":\"").append(jsonEscape(rs.getString("plant_name"))).append("\",")
+                            .append("\"zombie_name\":\"").append(jsonEscape(rs.getString("zombie_name"))).append("\",")
+                            .append("\"duration\":\"").append(jsonEscape(rs.getString("duration_text"))).append("\"}");
+                }
             }
         } catch (Exception e) {
             return "{\"items\":[],\"error\":\"" + jsonEscape(e.getMessage()) + "\"}";
@@ -461,7 +502,7 @@ final class DashboardServer {
                 "@media (max-width:1180px){body{overflow-x:hidden;padding:0 6px 18px 6px}.page{display:block;width:100%;min-width:0}.layout{grid-template-columns:minmax(0,1fr)}.deck-wrap{grid-template-columns:minmax(0,1fr)}.deck-list{height:380px}#cardsWrap{height:400px;overflow:auto}#cards{min-width:560px;font-size:12px}#recent{min-width:520px;font-size:12px}#cards th,#cards td,#recent th,#recent td{padding:5px 6px}#cards th,#recent th{white-space:nowrap}.card-head{display:grid;grid-template-columns:1fr;align-items:start}.card-head .seg{width:100%;display:grid;grid-template-columns:1fr 1fr}.seg .btn{min-width:0}.top{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;column-gap:8px;row-gap:10px;padding:14px 8px}.top>div:first-child{grid-column:1;grid-row:1;min-width:0}.top h1{font-size:21px}.controls{display:contents}.actions{grid-column:2;grid-row:1;justify-self:end;align-self:start;transform:none;margin-top:2px;max-width:100%;white-space:nowrap;flex-wrap:nowrap}.actions .btn{font-size:13px}.actions .sep{padding:0 5px}.filters{grid-column:1/-1;grid-row:2;transform:none;display:grid;grid-template-columns:repeat(2,minmax(150px,1fr));gap:8px;justify-content:stretch;justify-items:stretch}.flt{width:100%;font-size:13px;padding:9px 8px;min-width:0}#pie{max-width:min(420px,100%)}}" +
                 "</style></head><body><div class='page'>" +
                 "<div class='top'><div><h1 id='topTitle'>PvZ_TV 对战大数据</h1><div class='muted' id='subTitle'>有新数据自动刷新（最短间隔10秒）</div></div>" +
-                "<div class='controls'><div class='filters'><select id='extraSel' class='flt'><option value='false'>额外卡槽: 关</option><option value='true'>额外卡槽: 开</option></select><select id='bpSel' class='flt'><option value='true'>平衡调整: 开</option><option value='false'>平衡调整: 关</option></select><select id='modeSel' class='flt'><option value='DAY'>白天</option><option value='NIGHT'>黑夜</option><option value='POOL'>泳池白天</option><option value='FOG'>泳池黑夜</option><option value='ROOF'>屋顶</option></select></div><div class='actions'><button id='langBtn' class='btn'>中文 / EN</button><span class='sep'>|</span><button id='themeBtn' class='btn'>日间 / 夜间</button></div></div></div>" +
+                "<div class='controls'><div class='filters'><select id='versionSel' class='flt'><option value='all'>全部版本</option></select><select id='banSel' class='flt'><option value='false'>禁选模式: 关</option><option value='true'>禁选模式: 开</option></select><select id='extraSel' class='flt'><option value='false'>额外卡槽: 关</option><option value='true'>额外卡槽: 开</option></select><select id='modeSel' class='flt'><option value='DAY'>白天</option><option value='NIGHT'>黑夜</option><option value='POOL'>泳池白天</option><option value='FOG'>泳池黑夜</option><option value='ROOF'>屋顶</option></select></div><div class='actions'><button id='langBtn' class='btn'>中文 / EN</button><span class='sep'>|</span><button id='themeBtn' class='btn'>日间 / 夜间</button></div></div></div>" +
                 "<div class='layout'>" +
                 "<div class='card'><div class='card-head'><h3 id='deckTitle'>Top 10 卡组</h3><div class='seg'><button id='sidePlant' class='btn active'>植物</button><button id='sideZombie' class='btn'>僵尸</button></div></div><div class='deck-wrap'><div class='pie-box'><canvas id='pie' width='420' height='420'></canvas></div><div id='deckList' class='deck-list'></div></div></div>" +
                 "<div class='card'><h3 id='cardTitle'>单卡统计</h3><div id='cardsWrap'><table id='cards'><thead><tr><th id='thCard'>卡牌</th><th id='thPick'>选取</th><th id='thBan'>禁用</th><th id='thWin'>胜场</th><th id='thWr'>胜率</th><th id='thPr'>选取率</th><th id='thBr'>禁用率</th></tr></thead><tbody></tbody></table></div></div>" +
@@ -469,28 +510,30 @@ final class DashboardServer {
                 "<div class='card' style='margin-top:14px'><h3 id='recentTitle'>Recent Matches</h3><div id='recentWrap'><table id='recent'><thead><tr><th id='recentThTime'>Time</th><th id='recentThPlant'>Plant</th><th id='recentThZombie'>Zombie</th><th id='recentThWinner'>Winner</th><th id='recentThDuration'>Duration</th></tr></thead><tbody></tbody></table></div></div>" +
                 "</div>" +
                 "<script>" +
-                "let lang=(localStorage.getItem('pvz_lang')||'zh');let side=(localStorage.getItem('pvz_side')||'PLANT');let names={};let decks=[];let totalPlays=0;let decksLoading=true;let hoverDeck='';let extraPacket=(localStorage.getItem('pvz_extra_packet')||'true');let balancePatch=(localStorage.getItem('pvz_balance_patch')||'true');let banMode=(localStorage.getItem('pvz_ban_mode')||'true');let mode=(localStorage.getItem('pvz_mode')||'DAY');let theme=(localStorage.getItem('pvz_theme')||'light');let nextAutoRefreshAt=0;let autoRefreshTimer=0;let reqVer=0;const MIN_AUTO_REFRESH_MS=10000;" +
-                "const i18n={zh:{title:'PvZ_TV 对战大数据',deckTitle:'Top 10 卡组',cardTitle:'单卡统计',recentTitle:'最近对局',time:'时间',duration:'时长',winner:'胜方',sub:'有新数据自动刷新（最短间隔10秒）',card:'卡牌',pick:'选取',ban:'禁用',win:'胜场',wr:'胜率',pr:'选取率',br:'禁用率',plant:'植物',zombie:'僵尸',unknown:'未知卡牌',sideSuffix:'方',rate:'胜率',plays:'对局',winnerPlant:'植物',winnerZombie:'僵尸',noData:'暂无数据',loading:'加载中...',extraOff:'额外卡槽: 关',extraOn:'额外卡槽: 开',bpOn:'平衡调整: 开',bpOff:'平衡调整: 关',modeDay:'白天',modeNight:'黑夜',modePool:'泳池白天',modeFog:'泳池黑夜',modeRoof:'屋顶',themeLight:'☀日间',themeDark:'🌙夜间'},en:{title:'PvZ_TV Battle Data',deckTitle:'Top 10 Decks',cardTitle:'Card Stats',recentTitle:'Recent Matches',time:'Time',duration:'Duration',winner:'Winner',sub:'Auto refresh on new data (min 10s interval)',card:'Card',pick:'Pick',ban:'Ban',win:'Wins',wr:'Win Rate',pr:'Pick Rate',br:'Ban Rate',plant:'Plant',zombie:'Zombie',unknown:'UnknownSeed',sideSuffix:'',rate:'Win Rate',plays:'Plays',winnerPlant:'Plant',winnerZombie:'Zombie',noData:'No Data',loading:'Loading...',extraOff:'Extra Slot: Off',extraOn:'Extra Slot: On',bpOn:'Balance Patch: On',bpOff:'Balance Patch: Off',modeDay:'Day',modeNight:'Night',modePool:'Pool Day',modeFog:'Pool Night',modeRoof:'Roof',themeLight:'☀Light',themeDark:'🌙Dark'}};" +
+                "let lang=(localStorage.getItem('pvz_lang')||'zh');let side=(localStorage.getItem('pvz_side')||'PLANT');let names={};let versions=[];let netplayVersion='all';let decks=[];let totalPlays=0;let decksLoading=true;let hoverDeck='';let extraPacket=(localStorage.getItem('pvz_extra_packet')||'true');let banMode=(localStorage.getItem('pvz_ban_mode')||'true');let mode=(localStorage.getItem('pvz_mode')||'DAY');let theme=(localStorage.getItem('pvz_theme')||'light');let nextAutoRefreshAt=0;let autoRefreshTimer=0;let reqVer=0;const MIN_AUTO_REFRESH_MS=10000;" +
+                "const i18n={zh:{title:'PvZ_TV 对战大数据',deckTitle:'Top 10 卡组',cardTitle:'单卡统计',recentTitle:'最近对局',time:'时间',duration:'时长',winner:'胜方',sub:'有新数据自动刷新（最短间隔10秒）',card:'卡牌',pick:'选取',ban:'禁用',win:'胜场',wr:'胜率',pr:'选取率',br:'禁用率',plant:'植物',zombie:'僵尸',unknown:'未知卡牌',sideSuffix:'方',rate:'胜率',plays:'对局',winnerPlant:'植物',winnerZombie:'僵尸',noData:'暂无数据',loading:'加载中...',allVersions:'全部版本',versionLabel:'游戏版本: ',extraOff:'额外卡槽: 关',extraOn:'额外卡槽: 开',banOff:'禁选模式: 关',banOn:'禁选模式: 开',modeDay:'白天',modeNight:'黑夜',modePool:'泳池白天',modeFog:'泳池黑夜',modeRoof:'屋顶',themeLight:'☀日间',themeDark:'🌙夜间'},en:{title:'PvZ_TV Battle Data',deckTitle:'Top 10 Decks',cardTitle:'Card Stats',recentTitle:'Recent Matches',time:'Time',duration:'Duration',winner:'Winner',sub:'Auto refresh on new data (min 10s interval)',card:'Card',pick:'Pick',ban:'Ban',win:'Wins',wr:'Win Rate',pr:'Pick Rate',br:'Ban Rate',plant:'Plant',zombie:'Zombie',unknown:'UnknownSeed',sideSuffix:'',rate:'Win Rate',plays:'Plays',winnerPlant:'Plant',winnerZombie:'Zombie',noData:'No Data',loading:'Loading...',allVersions:'All Versions',versionLabel:'Game Version: ',extraOff:'Extra Slot: Off',extraOn:'Extra Slot: On',banOff:'Ban Mode: Off',banOn:'Ban Mode: On',modeDay:'Day',modeNight:'Night',modePool:'Pool Day',modeFog:'Pool Night',modeRoof:'Roof',themeLight:'☀Light',themeDark:'🌙Dark'}};" +
                 "function pct(x){return (x*100).toFixed(2)+'%'}" +
                 "function sideText(s){return s==='PLANT'?i18n[lang].plant:i18n[lang].zombie}" +
                 "function winnerText(w){return w==='PLANT'?i18n[lang].winnerPlant:(w==='ZOMBIE'?i18n[lang].winnerZombie:w)}" +
                 "function cardName(id,en,zh){const n=names[id];if(n){return lang==='zh'?(n.zh||n.en):n.en;}return lang==='zh'?(zh||en||i18n[lang].unknown):(en||i18n[lang].unknown)}" +
                 "function fmtTime(s){if(!s)return '-';const iso=s.includes('T')?s:(s.replace(' ','T')+'Z');const d=new Date(iso);if(Number.isNaN(d.getTime()))return s;return d.toLocaleString(lang==='zh'?'zh-CN':'en-US',{hour12:false});}" +
-                "function labels(){const t=i18n[lang];document.getElementById('topTitle').textContent=t.title;document.getElementById('deckTitle').textContent=sideText(side)+t.sideSuffix+' '+t.deckTitle;document.getElementById('cardTitle').textContent=t.cardTitle;document.getElementById('recentTitle').textContent=t.recentTitle;document.getElementById('recentThTime').textContent=t.time;document.getElementById('recentThPlant').textContent=t.plant;document.getElementById('recentThZombie').textContent=t.zombie;document.getElementById('recentThWinner').textContent=t.winner;document.getElementById('recentThDuration').textContent=t.duration;document.getElementById('subTitle').textContent=t.sub;document.getElementById('thCard').textContent=t.card;document.getElementById('thPick').textContent=t.pick;document.getElementById('thBan').textContent=t.ban;document.getElementById('thWin').textContent=t.win;document.getElementById('thWr').textContent=t.wr;document.getElementById('thPr').textContent=t.pr;document.getElementById('thBr').textContent=t.br;const e=document.getElementById('extraSel');e.options[0].text=t.extraOff;e.options[1].text=t.extraOn;const b=document.getElementById('bpSel');b.options[0].text=t.bpOn;b.options[1].text=t.bpOff;const m=document.getElementById('modeSel');m.options[0].text=t.modeDay;m.options[1].text=t.modeNight;m.options[2].text=t.modePool;m.options[3].text=t.modeFog;m.options[4].text=t.modeRoof;document.getElementById('sidePlant').textContent=t.plant;document.getElementById('sideZombie').textContent=t.zombie;document.getElementById('langBtn').textContent=(lang==='zh'?'中文 / EN':'EN / 中文');document.getElementById('themeBtn').textContent=(theme==='dark'?t.themeDark:t.themeLight);applyBanColumns();}" +
+                "function labels(){const t=i18n[lang];renderVersions();document.getElementById('topTitle').textContent=t.title;document.getElementById('deckTitle').textContent=sideText(side)+t.sideSuffix+' '+t.deckTitle;document.getElementById('cardTitle').textContent=t.cardTitle;document.getElementById('recentTitle').textContent=t.recentTitle;document.getElementById('recentThTime').textContent=t.time;document.getElementById('recentThPlant').textContent=t.plant;document.getElementById('recentThZombie').textContent=t.zombie;document.getElementById('recentThWinner').textContent=t.winner;document.getElementById('recentThDuration').textContent=t.duration;document.getElementById('subTitle').textContent=t.sub;document.getElementById('thCard').textContent=t.card;document.getElementById('thPick').textContent=t.pick;document.getElementById('thBan').textContent=t.ban;document.getElementById('thWin').textContent=t.win;document.getElementById('thWr').textContent=t.wr;document.getElementById('thPr').textContent=t.pr;document.getElementById('thBr').textContent=t.br;const e=document.getElementById('extraSel');e.options[0].text=t.extraOff;e.options[1].text=t.extraOn;const b=document.getElementById('banSel');b.options[0].text=t.banOff;b.options[1].text=t.banOn;const m=document.getElementById('modeSel');m.options[0].text=t.modeDay;m.options[1].text=t.modeNight;m.options[2].text=t.modePool;m.options[3].text=t.modeFog;m.options[4].text=t.modeRoof;document.getElementById('sidePlant').textContent=t.plant;document.getElementById('sideZombie').textContent=t.zombie;document.getElementById('langBtn').textContent=(lang==='zh'?'中文 / EN':'EN / 中文');document.getElementById('themeBtn').textContent=(theme==='dark'?t.themeDark:t.themeLight);applyBanColumns();}" +
                 "function applyBanColumns(){const on=(banMode==='true');['thBan','thBr'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display=on?'':'none';});}" +
+                "function renderVersions(){const sel=document.getElementById('versionSel');sel.innerHTML='';versions.forEach(v=>{const opt=document.createElement('option');opt.value=v;opt.textContent=i18n[lang].versionLabel+v;sel.appendChild(opt);});const all=document.createElement('option');all.value='all';all.textContent=i18n[lang].allVersions;sel.appendChild(all);sel.value=netplayVersion;}" +
+                "async function loadVersions(v){try{const r=await fetch('/api/versions',{cache:'no-store'});if(!r.ok)return;const j=await r.json();if(v!==reqVer||!Array.isArray(j.items))return;versions=j.items.map(String);if(netplayVersion!=='all'&&!versions.includes(netplayVersion))netplayVersion='all';renderVersions();}catch(_){}}" +
                 "async function loadNames(){const r=await fetch('/api/seed-names',{cache:'no-store'});const j=await r.json();names={};(j.items||[]).forEach(it=>names[it.seed_type]={en:it.en,zh:it.zh});}" +
                 "function color(i,a){const c=[[33,150,243],[0,200,83],[255,171,64],[255,82,82],[171,71,188],[0,229,255],[124,255,178],[41,182,246],[92,107,192],[255,138,101],[255,112,67],[64,196,255],[105,240,174],[255,214,0],[176,190,197]];const v=c[i%c.length];return 'rgba('+v[0]+','+v[1]+','+v[2]+','+a+')'}" +
                 "function drawPie(){const cv=document.getElementById('pie');const ctx=cv.getContext('2d');ctx.clearRect(0,0,cv.width,cv.height);const pieTotal=decks.reduce((s,d)=>s+d.plays,0);const total=totalPlays>0?totalPlays:pieTotal;if(decksLoading){ctx.fillStyle='#6c7a90';ctx.font='16px Microsoft YaHei';ctx.fillText(i18n[lang].loading,150,210);return;}if(pieTotal<=0){ctx.fillStyle='#6c7a90';ctx.font='16px Microsoft YaHei';ctx.fillText(i18n[lang].noData,158,210);return;}let start=-Math.PI/2;const cx=210,cy=210,r=170;" +
                 "decks.forEach((d,i)=>{const ang=(d.plays/pieTotal)*Math.PI*2;const active=(hoverDeck===''||hoverDeck===d.deck_ids);ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,r,start,start+ang);ctx.closePath();ctx.fillStyle=color(i,active?0.9:0.22);ctx.fill();start+=ang;});" +
                 "ctx.beginPath();ctx.arc(cx,cy,84,0,Math.PI*2);ctx.fillStyle=document.body.classList.contains('dark')?'#070b12':'#fff';ctx.fill();ctx.fillStyle=document.body.classList.contains('dark')?'#ffffff':'#2d3a52';ctx.font='bold 18px Microsoft YaHei';ctx.textAlign='center';ctx.fillText(String(total),cx,204);ctx.font='12px Microsoft YaHei';ctx.fillStyle='#74839b';ctx.fillText(lang==='zh'?'对局总数':'Total',cx,224);}" +
                 "function renderDecks(){const box=document.getElementById('deckList');box.innerHTML='';if(decksLoading){box.innerHTML='<div class=\"deck-item\">'+i18n[lang].loading+'</div>';return;}if(!decks.length){box.innerHTML='<div class=\"deck-item\">'+i18n[lang].noData+'</div>';return;}decks.forEach((d,idx)=>{const div=document.createElement('div');div.className='deck-item'+(hoverDeck===d.deck_ids?' active':'');const ids=(d.deck_ids||'').split('|').filter(Boolean).map(x=>parseInt(x,10));const deckText=ids.map(id=>cardName(id,'','')).join(' | ');const core=lang==='zh'?(d.core_zh||'未知核心'):(d.core_en||'UnknownCore');div.innerHTML='<div class=\"deck-core\">#'+(idx+1)+' '+core+'</div><div class=\"deck-meta\">'+i18n[lang].plays+': '+d.plays+' | '+i18n[lang].rate+': '+pct(d.win_rate)+'</div><div class=\"deck-cards\">'+deckText+'</div>';div.addEventListener('mouseenter',()=>{hoverDeck=d.deck_ids;renderDecks();drawPie();});div.addEventListener('mouseleave',()=>{hoverDeck='';renderDecks();drawPie();});box.appendChild(div);});}" +
-                "function qs(){return 'side='+encodeURIComponent(side)+'&extra_packet='+encodeURIComponent(extraPacket)+'&balance_patch='+encodeURIComponent(balancePatch)+'&ban_mode='+encodeURIComponent(banMode)+'&mode='+encodeURIComponent(mode)}" +
+                "function qs(){return 'side='+encodeURIComponent(side)+'&netplay_version='+encodeURIComponent(netplayVersion)+'&extra_packet='+encodeURIComponent(extraPacket)+'&ban_mode='+encodeURIComponent(banMode)+'&mode='+encodeURIComponent(mode)}" +
                 "async function loadDecks(v){let nextDecks=[];let nextTotal=0;try{const r=await fetch('/api/top-decks?'+qs(),{cache:'no-store'});const j=await r.json();nextDecks=j.items||[];nextTotal=(j.total_plays||0);}catch(_){}if(v!==reqVer)return;decks=nextDecks;totalPlays=nextTotal;decksLoading=false;if(hoverDeck && !decks.some(d=>d.deck_ids===hoverDeck))hoverDeck='';renderDecks();drawPie();}" +
                 "function renderCardsLoading(){const tb=document.querySelector('#cards tbody');if(!tb)return;const cols=(banMode==='true'?7:5);tb.innerHTML='<tr><td colspan=\"'+cols+'\">'+i18n[lang].loading+'</td></tr>';}" +
                 "function waitForPaint(){return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));}" +
                 "async function loadCards(v){let items=[];try{const r=await fetch('/api/card-stats?'+qs(),{cache:'no-store'});const j=await r.json();items=j.items||[];}catch(_){}if(v!==reqVer)return;const tb=document.querySelector('#cards tbody');tb.innerHTML='';const on=(banMode==='true');items.forEach(it=>{const tr=document.createElement('tr');tr.innerHTML=on?('<td>'+cardName(it.seed_type,it.seed_en,it.seed_zh)+'</td><td>'+it.picked+'</td><td>'+it.banned+'</td><td>'+it.won+'</td><td>'+pct(it.win_rate)+'</td><td>'+pct(it.pick_rate)+'</td><td>'+pct(it.ban_rate)+'</td>'):('<td>'+cardName(it.seed_type,it.seed_en,it.seed_zh)+'</td><td>'+it.picked+'</td><td>'+it.won+'</td><td>'+pct(it.win_rate)+'</td><td>'+pct(it.pick_rate)+'</td>');tb.appendChild(tr);});}" +
-                "async function loadRecent(v){let items=[];try{const r=await fetch('/api/recent-matches',{cache:'no-store'});const j=await r.json();items=j.items||[];}catch(_){}if(v!==reqVer)return;const tb=document.querySelector('#recent tbody');tb.innerHTML='';(items||[]).forEach(it=>{const tr=document.createElement('tr');const p=it.plant_name&&it.plant_name.length?it.plant_name:'-';const z=it.zombie_name&&it.zombie_name.length?it.zombie_name:'-';tr.innerHTML='<td>'+fmtTime(it.finished_at)+'</td><td>'+p+'</td><td>'+z+'</td><td>'+winnerText(it.winner)+'</td><td>'+it.duration+'</td>';tb.appendChild(tr);});}" +
-                "async function tick(){const v=++reqVer;await Promise.allSettled([loadDecks(v),loadCards(v),loadRecent(v)]);}" +
+                "async function loadRecent(v){let items=[];try{const r=await fetch('/api/recent-matches?netplay_version='+encodeURIComponent(netplayVersion),{cache:'no-store'});const j=await r.json();items=j.items||[];}catch(_){}if(v!==reqVer)return;const tb=document.querySelector('#recent tbody');tb.innerHTML='';(items||[]).forEach(it=>{const tr=document.createElement('tr');const p=it.plant_name&&it.plant_name.length?it.plant_name:'-';const z=it.zombie_name&&it.zombie_name.length?it.zombie_name:'-';tr.innerHTML='<td>'+fmtTime(it.finished_at)+'</td><td>'+p+'</td><td>'+z+'</td><td>'+winnerText(it.winner)+'</td><td>'+it.duration+'</td>';tb.appendChild(tr);});}" +
+                "async function tick(){const v=++reqVer;await loadVersions(v);if(v!==reqVer)return;await Promise.allSettled([loadDecks(v),loadCards(v),loadRecent(v)]);}" +
                 "function scheduleAutoRefresh(){const now=Date.now();if(now>=nextAutoRefreshAt){nextAutoRefreshAt=now+MIN_AUTO_REFRESH_MS;tick();return;}if(autoRefreshTimer)return;autoRefreshTimer=setTimeout(()=>{autoRefreshTimer=0;nextAutoRefreshAt=Date.now()+MIN_AUTO_REFRESH_MS;tick();},Math.max(0,nextAutoRefreshAt-now));}" +
                 "function renderSideBtns(){const p=document.getElementById('sidePlant');const z=document.getElementById('sideZombie');if(side==='PLANT'){p.classList.add('active');z.classList.remove('active');}else{z.classList.add('active');p.classList.remove('active');}}" +
                 "document.getElementById('langBtn').addEventListener('click',async()=>{lang=(lang==='zh'?'en':'zh');localStorage.setItem('pvz_lang',lang);labels();const bn=document.getElementById('banSel');if(bn){bn.options[0].text=(lang==='zh'?'禁选模式: 关':'Ban Mode: Off');bn.options[1].text=(lang==='zh'?'禁选模式: 开':'Ban Mode: On');}renderSideBtns();renderDecks();drawPie();await tick();});" +
@@ -504,10 +547,11 @@ final class DashboardServer {
                 "sideZombieBtn.addEventListener('touchend',async(e)=>{e.preventDefault();await switchSide('ZOMBIE');},{passive:false});" +
                 "async function onFilterChanged(){hoverDeck='';decks=[];totalPlays=0;decksLoading=true;renderDecks();drawPie();await tick();}" +
                 "function bindSelect(sel,fn){if(!sel)return;sel.addEventListener('change',fn);sel.addEventListener('input',fn);}" +
+                "bindSelect(document.getElementById('versionSel'),async(e)=>{netplayVersion=e.target.value;await onFilterChanged();});" +
                 "bindSelect(document.getElementById('extraSel'),async(e)=>{extraPacket=e.target.value;localStorage.setItem('pvz_extra_packet',extraPacket);await onFilterChanged();});" +
-                "bindSelect(document.getElementById('bpSel'),async(e)=>{balancePatch=e.target.value;localStorage.setItem('pvz_balance_patch',balancePatch);await onFilterChanged();});" +
+                "bindSelect(document.getElementById('banSel'),async(e)=>{banMode=e.target.value;localStorage.setItem('pvz_ban_mode',banMode);applyBanColumns();await onFilterChanged();});" +
                 "bindSelect(document.getElementById('modeSel'),async(e)=>{mode=e.target.value;localStorage.setItem('pvz_mode',mode);await onFilterChanged();});" +
-                "(async()=>{const extra=document.getElementById('extraSel');if(extra)extra.value=extraPacket;const bp=document.getElementById('bpSel');if(bp){bp.value=balancePatch;const bn=document.createElement('select');bn.id='banSel';bn.className='flt';bn.innerHTML='<option value=\"false\">Ban Mode: Off</option><option value=\"true\">Ban Mode: On</option>';bp.insertAdjacentElement('afterend',bn);bn.value=banMode;bindSelect(bn,async(e)=>{banMode=e.target.value;localStorage.setItem('pvz_ban_mode',banMode);applyBanColumns();await onFilterChanged();});}const modeSel=document.getElementById('modeSel');if(modeSel)modeSel.value=mode;applyTheme();labels();const bn2=document.getElementById('banSel');if(bn2){bn2.options[0].text=(lang==='zh'?'禁选模式: 关':'Ban Mode: Off');bn2.options[1].text=(lang==='zh'?'禁选模式: 开':'Ban Mode: On');}applyBanColumns();renderSideBtns();await loadNames();await tick();if(window.EventSource){const es=new EventSource('/api/stream');es.addEventListener('settle',()=>{scheduleAutoRefresh();});es.onerror=()=>{};}})();" +
+                "(async()=>{const extra=document.getElementById('extraSel');if(extra)extra.value=extraPacket;document.getElementById('banSel').value=banMode;const modeSel=document.getElementById('modeSel');if(modeSel)modeSel.value=mode;applyTheme();labels();const bn2=document.getElementById('banSel');if(bn2){bn2.options[0].text=(lang==='zh'?'禁选模式: 关':'Ban Mode: Off');bn2.options[1].text=(lang==='zh'?'禁选模式: 开':'Ban Mode: On');}applyBanColumns();renderSideBtns();await loadNames();await tick();if(window.EventSource){const es=new EventSource('/api/stream');es.addEventListener('settle',()=>{scheduleAutoRefresh();});es.onerror=()=>{};}})();" +
                 "</script></body></html>";
     }
 
@@ -553,21 +597,37 @@ final class DashboardServer {
         }
     }
 
-    private static int queryTotalDeckMatchesByFilter(String side, String extraPacket, String balancePatch, String banMode, String modeFilter) {
-        final String sql = "SELECT COUNT(*) AS c FROM match_decks d JOIN match_results r ON r.id=d.match_id WHERE d.side=? AND r.extra_packet=? AND r.balance_patch=? AND r.ban_mode=? AND r.bg=? AND d.deck_ids<>''";
+    private static int queryTotalDeckMatchesByFilter(String side, String extraPacket, String banMode, String modeFilter, long version) {
+        final String sql = "SELECT COUNT(*) AS c FROM match_decks d JOIN match_results r ON r.id=d.match_id WHERE d.side=? AND r.extra_packet=? AND r.game_mode='NORMAL' AND r.ban_mode=? AND r.bg=? AND d.deck_ids<>''"
+                + versionCondition(version);
         try (Connection conn = DriverManager.getConnection(DB_URL);
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, side);
             ps.setString(2, extraPacket);
-            ps.setString(3, balancePatch);
-            ps.setString(4, banMode);
-            ps.setString(5, modeFilter);
+            ps.setString(3, banMode);
+            ps.setString(4, modeFilter);
+            if (version > 0) ps.setLong(5, version);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) return rs.getInt("c");
             }
         } catch (Exception ignored) {
         }
         return 0;
+    }
+
+    private static String versionCondition(long version) {
+        return version > 0 ? " AND r.netplay_version=?" : "";
+    }
+
+    private static long readVersionFilter(HttpExchange exchange) throws IOException {
+        String raw = queryParam(exchange.getRequestURI().getRawQuery(), "netplay_version");
+        if (raw == null || "all".equalsIgnoreCase(raw)) return 0;
+        try {
+            return AnalyticsCollector.parseNetplayVersion(raw);
+        } catch (IllegalArgumentException e) {
+            writeText(exchange, 400, "{\"error\":\"invalid_netplay_version\"}", "application/json; charset=utf-8");
+            return -1;
+        }
     }
 
     private static void writeText(HttpExchange ex, int code, String body, String contentType) throws IOException {

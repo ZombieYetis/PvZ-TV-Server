@@ -67,8 +67,8 @@ final class MetricsStore {
 
     private static long insertMatchResult(String settleId, int roomId, String winner, int mainCounter, AnalyticsCollector.SettlementMeta meta) throws SQLException {
         int frames = Math.max(mainCounter, 0);
-        String sql = "INSERT INTO match_results(settle_id, room_id, winner, duration_text, bg, battle_type, game_mode, extra_packet, extended_seeds, ban_mode, balance_patch, mower_loss, target_loss, sunflower_loss, grave_loss, plant_name, zombie_name, finished_at) " +
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + UTC_NOW_SQL + ")";
+        String sql = "INSERT INTO match_results(settle_id, room_id, winner, duration_text, bg, battle_type, game_mode, extra_packet, extended_seeds, ban_mode, balance_patch, mower_loss, target_loss, sunflower_loss, grave_loss, plant_name, zombie_name, netplay_version, finished_at) " +
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + UTC_NOW_SQL + ")";
         try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setString(1, settleId);
             ps.setInt(2, roomId);
@@ -76,7 +76,7 @@ final class MetricsStore {
             ps.setString(4, formatDurationMMSS(frames));
             ps.setString(5, mapBg(meta == null ? -1 : meta.background));
             ps.setString(6, mapBattleType(meta == null ? -1 : meta.battleType));
-            ps.setString(7, (meta != null && meta.shuffleMode) ? "SHUFFLE" : "NORMAL");
+            ps.setString(7, meta == null ? "NORMAL" : meta.gameMode);
             ps.setString(8, boolText(meta != null && meta.addonExtraPackets));
             ps.setString(9, boolText(meta != null && meta.addonExtraSeeds));
             ps.setString(10, boolText(meta != null && meta.addonBanMode));
@@ -87,6 +87,7 @@ final class MetricsStore {
             ps.setInt(15, meta == null ? 0 : meta.graveLoss);
             ps.setString(16, clipName(meta == null ? "" : meta.plantName));
             ps.setString(17, clipName(meta == null ? "" : meta.zombieName));
+            ps.setLong(18, meta == null ? 0 : meta.netplayVersion);
             ps.executeUpdate();
             try (ResultSet rs = ps.getGeneratedKeys()) {
                 if (rs.next()) return rs.getLong(1);
@@ -227,6 +228,7 @@ final class MetricsStore {
                     "bg TEXT NOT NULL DEFAULT 'UNKNOWN'," +
                     "battle_type TEXT NOT NULL DEFAULT 'UNKNOWN'," +
                     "game_mode TEXT NOT NULL DEFAULT 'NORMAL'," +
+                    "netplay_version INTEGER NOT NULL DEFAULT 0," +
                     "extra_packet TEXT NOT NULL DEFAULT 'false'," +
                     "extended_seeds TEXT NOT NULL DEFAULT 'false'," +
                     "ban_mode TEXT NOT NULL DEFAULT 'false'," +
@@ -239,6 +241,7 @@ final class MetricsStore {
                     "zombie_name TEXT NOT NULL DEFAULT ''," +
                     "finished_at TEXT NOT NULL" +
                     ")");
+            ensureNetplayVersionColumn(c);
             st.execute("CREATE TABLE IF NOT EXISTS card_stats (" +
                     "seed_type INTEGER PRIMARY KEY," +
                     "picked INTEGER NOT NULL DEFAULT 0," +
@@ -291,9 +294,30 @@ final class MetricsStore {
             );
 
             st.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_results_dashboard " +
-                            "ON match_results(extra_packet, balance_patch, ban_mode, bg, game_mode, id)"
+                    "CREATE INDEX IF NOT EXISTS idx_results_dashboard_mode " +
+                            "ON match_results(game_mode, extra_packet, ban_mode, bg, id)"
             );
+            st.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_results_recent_normal " +
+                            "ON match_results(id) WHERE game_mode='NORMAL'"
+            );
+            st.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_results_netplay_version " +
+                            "ON match_results(game_mode, netplay_version, id)"
+            );
+            // Replace the old switch-based index only after the mode-based index exists.
+            st.execute("DROP INDEX IF EXISTS idx_results_dashboard");
+        }
+    }
+
+    private static void ensureNetplayVersionColumn(Connection c) throws SQLException {
+        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery("PRAGMA table_info(match_results)")) {
+            while (rs.next()) {
+                if ("netplay_version".equals(rs.getString("name"))) return;
+            }
+        }
+        try (Statement st = c.createStatement()) {
+            st.execute("ALTER TABLE match_results ADD COLUMN netplay_version INTEGER NOT NULL DEFAULT 0");
         }
     }
 
