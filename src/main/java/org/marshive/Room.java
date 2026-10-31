@@ -10,6 +10,7 @@ public class Room {
     private final int protocolVersion;
     private final long createdAtMillis;
     private volatile ClientHandler guest;
+    final RelayReconnect reconnect = new RelayReconnect();
     private volatile boolean gaming = false;
     private volatile boolean p2pNegotiating = false;
     private volatile boolean p2pEstablished = false;
@@ -71,7 +72,7 @@ public class Room {
     }
 
     public boolean isFull() {
-        return host != null && guest != null;
+        return host != null && (guest != null || reconnect.state != RelayReconnect.NONE);
     }
 
     public boolean isP2pNegotiating() {

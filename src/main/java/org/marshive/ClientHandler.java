@@ -82,6 +82,7 @@ public class ClientHandler {
     private ClientHandler relayPeer;
     private boolean spectatorStreamRequested = false;
     private boolean spectatorRelayOpen = false;
+    private long reconnectTryAfter;
     private int badCommandCount = 0;
     private long controlWindowStartedNanos = System.nanoTime();
     private int controlCommandsInWindow;
@@ -196,6 +197,21 @@ public class ClientHandler {
     void onTick(long nowMillis) throws IOException {
         if (closed) return;
         if (writeOverflow) throw new IOException("Slow client exceeded write budget");
+        Room reconnectRoom = currentRoom;
+        if (reconnectRoom != null && reconnectRoom.getProtocolVersion() >= RelayReconnect.VERSION
+                && reconnectRoom.isGaming() && reconnectRoom.isRelayMode() && !isSpectator) {
+            if (nowMillis - lastActiveAtMillis >= RelayReconnect.HEARTBEAT_TIMEOUT_MS)
+                throw new IOException("Relay heartbeat timeout");
+            if (isHost) {
+                RelayReconnect r = reconnectRoom.reconnect;
+                if (r.state != RelayReconnect.NONE && r.state != RelayReconnect.WAITING
+                        && r.state != RelayReconnect.CLOSING && (nowMillis >= r.deadline
+                        || (r.state != RelayReconnect.FREEZING && nowMillis >= r.attemptDeadline))) {
+                    if (r.state == RelayReconnect.FREEZING) throw new IOException("Host did not freeze");
+                    failReconnect(reconnectRoom);
+                }
+            }
+        }
         applyProbe(pendingProbe1.getAndSet(null), 1);
         applyProbe(pendingProbe2.getAndSet(null), 2);
         if (nowMillis - lastActiveAtMillis >= IDLE_TIMEOUT_MS) {
@@ -255,7 +271,9 @@ public class ClientHandler {
     }
 
     private void relayReadable() throws IOException {
-        if (relayPeer == null || relayPeer.closed) throw new IOException("Relay peer closed");
+        Room activeRoom = currentRoom;
+        boolean reconnectable = activeRoom != null && activeRoom.getProtocolVersion() >= RelayReconnect.VERSION;
+        if (!reconnectable && (relayPeer == null || relayPeer.closed)) throw new IOException("Relay peer closed");
         readBuf.clear();
         readBuf.limit(4096);
         int n = ch.read(readBuf);
@@ -282,12 +300,22 @@ public class ClientHandler {
         ArrayList<byte[]> events = drainSpectatorRelayEvents();
         for (byte[] event : events) {
             int type = event[0] & 0xFF;
+            if (room != null && room.getProtocolVersion() >= RelayReconnect.VERSION) {
+                if (handleReconnectEvent(room, event)) continue;
+                RelayReconnect r = room.reconnect;
+                if (r.state != RelayReconnect.NONE) {
+                    // Drain the host's pre-freeze tail to existing viewers. FROZEN is the barrier.
+                    if (isHost && r.state == RelayReconnect.FREEZING) mirrorRelayEventToSpectators(event);
+                    continue;
+                }
+                if (room.getHost() != this && room.getGuest() != this) continue;
+            }
             if (type >= 240 && type <= 248) {
                 // Only the relay may request snapshots; only the host may publish snapshots or replay history.
                 if (type == 240 || !isHost) continue;
                 mirrorRelayEventToSpectators(event);
             } else {
-                relayPeer.enqueueRaw(event);
+                if (relayPeer != null && !relayPeer.closed) relayPeer.enqueueRaw(event);
                 mirrorRelayEventToSpectators(event);
             }
         }
@@ -396,6 +424,16 @@ public class ClientHandler {
 
     private boolean parseAndHandle(MsgType type, int cmdStartPos) throws IOException {
         switch (type) {
+            case RECONNECT_JOIN: {
+                if (readBuf.remaining() < 9) return false;
+                handleReconnectJoin(readBuf.getInt(), readBuf.getInt(), u8(readBuf.get()));
+                return true;
+            }
+            case RECONNECT_READY: {
+                if (readBuf.remaining() < 8) return false;
+                handleReconnectReady(readBuf.getInt(), readBuf.getInt());
+                return true;
+            }
             case CREATE: {
                 if (readBuf.remaining() < 1) return false;
                 int nameLen = u8(readBuf.get());
@@ -506,6 +544,153 @@ public class ClientHandler {
 
     private boolean isCurrentRoomPlayer() {
         return isCurrentRoomHost() || isCurrentRoomGuest();
+    }
+
+    private void handleReconnectJoin(int roomId, int version, int code) throws IOException {
+        Room room = rm.getRoom(roomId);
+        int error = 0;
+        long now = System.currentTimeMillis();
+        if (currentRoom != null) error = 2;
+        else if (room == null) error = 1;
+        else if (version != room.getProtocolVersion() || version < RelayReconnect.VERSION) error = 5;
+        else if (room.reconnect.state != RelayReconnect.WAITING) error = 2;
+        else if (now < reconnectTryAfter || !room.reconnect.allowCodeAttempt(now)) error = 6;
+        else if (code > 99 || code != room.reconnect.code) { error = 3; reconnectTryAfter = now + 2000; }
+        byte[] result = new byte[13];
+        result[0] = (byte) error;
+        if (error == 0) {
+            RelayReconnect r = room.reconnect;
+            r.newAttempt(this);
+            currentRoom = room;
+            protocolVersion = version;
+            playerName = r.guestName;
+            isHost = isSpectator = false;
+            writeIntTo(result, 1, roomId);
+            writeIntTo(result, 5, r.epoch);
+            writeIntTo(result, 9, r.transfer);
+            reconnectState(room.getHost(), room, true);
+        }
+        sendFrame(RespType.RECONNECT_RESULT.code, result);
+    }
+
+    private void handleReconnectReady(int epoch, int transfer) throws IOException {
+        Room room = currentRoom;
+        if (room == null) { sendError(ERR_BAD_REQ); return; }
+        RelayReconnect r = room.reconnect;
+        if (r.candidate != this || r.state != RelayReconnect.ATTACHING || r.epoch != epoch || r.transfer != transfer) {
+            sendError(ERR_BAD_REQ); return;
+        }
+        byte[] payload = new byte[8];
+        writeIntTo(payload, 0, epoch); writeIntTo(payload, 4, transfer);
+        sendFrame(RespType.RECONNECT_GO.code, payload); // Last framed response on this connection.
+        relayDataMode = true;
+        relayPeer = null;
+        resetSpectatorRelayAssembly();
+        r.state = RelayReconnect.SYNCING;
+        r.deadline = System.currentTimeMillis() + RelayReconnect.TIMEOUT_MS;
+        room.getHost().enqueueRaw(RelayReconnect.control(RelayReconnect.SYNC, r.state, epoch, transfer, 0));
+    }
+
+    private static void reconnectState(ClientHandler target, Room room, boolean showCode) {
+        if (target == null || target.closed) return;
+        RelayReconnect r = room.reconnect;
+        try {
+            target.enqueueRaw(RelayReconnect.control(RelayReconnect.STATE, r.state, r.epoch, r.transfer,
+                    showCode && r.state == RelayReconnect.WAITING ? r.code : -1));
+        } catch (IOException e) { target.close(); }
+    }
+
+    private static void reconnectViewers(Room room, byte[] event) {
+        for (ClientHandler viewer : room.snapshotSpectators()) {
+            if (viewer.closed || !viewer.spectatorRelayOpen) continue;
+            try { viewer.enqueueRaw(event); } catch (IOException e) { viewer.close(); }
+        }
+    }
+
+    private static void failReconnect(Room room) {
+        RelayReconnect r = room.reconnect;
+        if (r.state == RelayReconnect.CLOSING || r.state == RelayReconnect.NONE) return;
+        ClientHandler pending = r.candidate;
+        r.candidate = null; // Detach before close(), whose callback may re-enter here.
+        r.state = RelayReconnect.WAITING;
+        r.expected = r.received = 0;
+        r.snapshotEnded = false;
+        if (pending != null) { pending.currentRoom = null; pending.close(); }
+        reconnectState(room.getHost(), room, true);
+    }
+
+    private boolean handleReconnectEvent(Room room, byte[] event) throws IOException {
+        int type = event[0] & 255;
+        if (type < RelayReconnect.CONTROL || type > RelayReconnect.END) return false;
+        RelayReconnect r = room.reconnect;
+        if (type == RelayReconnect.CONTROL) {
+            if (event.length != 16) throw new IOException("Invalid reconnect control size");
+            int op = event[2] & 255;
+            if (op == RelayReconnect.PING) {
+                enqueueRaw(RelayReconnect.control(RelayReconnect.PONG, 0, 0, 0, 0));
+                return true;
+            }
+            if (RelayReconnect.intAt(event, 4) != r.epoch || RelayReconnect.intAt(event, 8) != r.transfer) return true;
+            int value = RelayReconnect.intAt(event, 12);
+            if (op == RelayReconnect.CANCEL && room.getHost() == this) {
+                close();
+            } else if (op == RelayReconnect.FROZEN && room.getHost() == this && r.state == RelayReconnect.FREEZING) {
+                if (value != 1) { close(); return true; }
+                r.state = RelayReconnect.WAITING;
+                reconnectState(this, room, true);
+                reconnectViewers(room, RelayReconnect.control(RelayReconnect.STATE, r.state, r.epoch, r.transfer, -1));
+            } else if (op == RelayReconnect.LOADED && r.candidate == this && r.state == RelayReconnect.SYNCING) {
+                if (value != 1) { failReconnect(room); return true; }
+                if (!r.snapshotEnded) return true;
+                r.state = RelayReconnect.RESUMING;
+                r.deadline = System.currentTimeMillis() + RelayReconnect.TIMEOUT_MS;
+                room.getHost().enqueueRaw(event);
+            } else if (op == RelayReconnect.LOADED && room.getHost() == this && r.state == RelayReconnect.SYNCING && value == 0) {
+                failReconnect(room); // Host could not capture this scene.
+            } else if (op == RelayReconnect.COMMIT && room.getHost() == this && r.state == RelayReconnect.RESUMING) {
+                ClientHandler next = r.candidate;
+                if (next == null || next.closed) { failReconnect(room); return true; }
+                byte[] resume = RelayReconnect.control(RelayReconnect.RESUME, 0, r.epoch, r.transfer, 0);
+                // Queue the barrier on every stream BEFORE accepting any new gameplay input.
+                try { next.enqueueRaw(resume); } catch (IOException e) { failReconnect(room); return true; }
+                enqueueRaw(resume);
+                reconnectViewers(room, resume);
+                room.setGuest(next);
+                relayPeer = next;
+                next.relayPeer = this;
+                r.candidate = null;
+                r.state = RelayReconnect.NONE;
+                r.code = -1;
+            }
+            return true;
+        }
+        if (room.getHost() != this || r.state != RelayReconnect.SYNCING || r.candidate == null) return true;
+        if (event.length < 10 || RelayReconnect.intAt(event, 2) != r.epoch || RelayReconnect.intAt(event, 6) != r.transfer) return true;
+        boolean valid = false;
+        if (type == RelayReconnect.BEGIN && event.length == 26 && r.expected == 0) {
+            int size = RelayReconnect.intAt(event, 14);
+            if (size > 0 && size <= RelayReconnect.MAX_SNAPSHOT) {
+                r.expected = size;
+                r.expectedHash = RelayReconnect.intAt(event, 18);
+                valid = true;
+            }
+        } else if (type == RelayReconnect.CHUNK && event.length >= 16 && r.expected > 0 && !r.snapshotEnded) {
+            int count = RelayReconnect.u16At(event, 14);
+            if (count > 0 && count == event.length - 16 && RelayReconnect.intAt(event, 10) == r.received
+                    && count <= r.expected - r.received) {
+                for (int i = 16; i < event.length; ++i) r.hash = (r.hash ^ (event[i] & 255)) * 16777619;
+                r.received += count;
+                valid = true;
+            }
+        } else if (type == RelayReconnect.END && event.length == 10 && r.expected > 0 && !r.snapshotEnded
+                && r.received == r.expected && r.hash == r.expectedHash) {
+            r.snapshotEnded = true;
+            valid = true;
+        }
+        if (!valid) { failReconnect(room); return true; }
+        r.deadline = Math.min(System.currentTimeMillis() + RelayReconnect.TIMEOUT_MS, r.attemptDeadline);
+        try { r.candidate.enqueueRaw(event); } catch (IOException e) { failReconnect(room); }
+        return true;
     }
 
     private void handleCreate(String roomName, int clientVersion) throws IOException {
@@ -961,6 +1146,10 @@ public class ClientHandler {
             return;
         }
         if (spectatorStreamRequested && spectatorRelayOpen) return;
+        if (room.reconnect.state != RelayReconnect.NONE) {
+            sendError(ERR_NOT_READY); // Retry after recovery; do not start a competing snapshot.
+            return;
+        }
         spectatorStreamRequested = true;
         spectatorRelayOpen = false;
         sendReserveSpectateAck(room, true);
@@ -1433,7 +1622,7 @@ public class ClientHandler {
         for (Room r : rm.allRooms()) {
             boolean hasGuestSlot = !r.isGaming() && !r.isFull();
             boolean hasSpectateSlot = r.isSpectateAllowed() && r.spectatorCount() < MAX_SPECTATORS_PER_ROOM;
-            if (!hasGuestSlot && !hasSpectateSlot) continue;
+            if (!hasGuestSlot && !hasSpectateSlot && r.reconnect.state == RelayReconnect.NONE) continue;
             if (list.size() >= 255) break;
             list.add(r);
         }
@@ -1457,6 +1646,8 @@ public class ClientHandler {
             if (guest != null && guest.isProbeReady()) flags |= 8;
             if (r.isSpectateAllowed()) flags |= 16;
             if (r.isForceRelay()) flags |= 32;
+            if (r.reconnect.state != RelayReconnect.NONE) flags |= 64;
+            if (r.reconnect.state != RelayReconnect.NONE && r.reconnect.state != RelayReconnect.WAITING) flags |= 128;
             p[off++] = (byte) flags;
             writeIntTo(p, off, r.getProtocolVersion());
             off += 4;
@@ -1531,6 +1722,15 @@ public class ClientHandler {
             return;
         }
         if (isHost) {
+            room.reconnect.state = RelayReconnect.CLOSING;
+            ClientHandler pending = room.reconnect.candidate;
+            room.reconnect.candidate = null;
+            if (pending != null) { pending.currentRoom = null; pending.close(); }
+            ClientHandler playingGuest = room.getGuest();
+            if (room.isGaming() && room.isRelayMode() && room.getProtocolVersion() >= RelayReconnect.VERSION && playingGuest != null) {
+                playingGuest.currentRoom = null;
+                playingGuest.close();
+            }
             notifyGuestRoomExited(room);
             for (ClientHandler s : room.snapshotSpectators()) {
                 if (s == null) continue;
@@ -1550,6 +1750,15 @@ public class ClientHandler {
             }
             rm.removeRoom(room.getId());
             AnalyticsCollector.onRoomClosed(room.getId());
+        } else if (room.reconnect.candidate == this) {
+            failReconnect(room);
+        } else if (room.isGaming() && room.isRelayMode() && room.getProtocolVersion() >= RelayReconnect.VERSION
+                && room.getGuest() == this && room.reconnect.state == RelayReconnect.NONE) {
+            room.reconnect.guestName = playerName;
+            room.setGuest(null);
+            room.getHost().relayPeer = null;
+            room.reconnect.begin();
+            reconnectState(room.getHost(), room, true);
         } else if (!room.isGaming() && room.getGuest() == this) {
             room.setGuest(null);
             logGuestFlow("LEFT_DISCONNECT", room, this);

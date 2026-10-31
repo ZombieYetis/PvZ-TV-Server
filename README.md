@@ -66,6 +66,36 @@ java -jar PvZ-TV-Server.jar --base=26667 --replicate_to=IP:PORT
 | `--dashboard`    | 是否开启 Dashboard 数据统计页面 | `--dashboard=true`              |
 | `--replicate_to` | 将对战数据转发到指定地址 | `--replicate_to=127.0.0.1:3000` |
 
+## 中转断线重连（联机协议 3215）
+
+游戏与服务器需一起更新。仅处理已开始的中转对局中房客掉线、主机仍在线的情况；主机断线或主动断开会结束房间。P2P、局域网和旧协议保持原有断线行为。游戏可恢复对战、结盟的稳定选卡阶段与战斗现场；结算、切换关卡和正在同步结盟存档时不创建重连快照。
+
+房客掉线后保留房间与席位，主机冻结当前局面并显示 `00–99` 的两位重连码。房客从大厅加入原房间、输入重连码后，接收主机的 Board 快照；加载确认完成后，双方和已有观战者再恢复。主机可随时选择断开。重连失败仅关闭该次尝试，主机继续等待。每次新的掉线生成新码，同一次等待中的重试沿用原码。
+
+大厅请求及响应（多字节整数均为大端）：
+
+| 消息 | 内容 |
+| --- | --- |
+| `0x12 RECONNECT_JOIN` | `roomId:u32, version:u32, code:u8` |
+| `0x91 RECONNECT_RESULT` | `status:u8, roomId:u32, epoch:u32, transfer:u32`；状态 `0` 成功、`1` 房间不存在、`2` 不可重连、`3` 错码、`5` 版本不符、`6` 限流 |
+| `0x13 RECONNECT_READY` | `epoch:u32, transfer:u32` |
+| `0x92 RECONNECT_GO` | `epoch:u32, transfer:u32`；此帧之后该连接进入原始事件流 |
+
+房间列表 flags 的 `64` 表示保留席位等待重连，`128` 表示冻结或同步中。即使禁止观战，等待重连的房间仍会出现在大厅。重连码仅发给主机，不写入房间列表。
+
+原始事件保留 `[type:u8, size:u8]` 头，新事件使用以下布局：
+
+- `249 CONTROL`（16 字节）：`op:u8, phase:u8, epoch:u32, transfer:u32, value:u32`。
+- `250 BEGIN`（26 字节）：`epoch:u32, transfer:u32, schema:u16, gameMode:u16, totalSize:u32, hash:u32, appTick:u32`。
+- `251 CHUNK`：`epoch:u32, transfer:u32, offset:u32, count:u16, data[count]`；游戏每片最多 224 字节。
+- `252 END`（10 字节）：`epoch:u32, transfer:u32`。
+
+控制操作依次为 `STATE=1, FROZEN=2, SYNC=3, LOADED=4, COMMIT=5, RESUME=6, CANCEL=7, PING=8, PONG=9`。状态依次为 `NONE=0, FREEZING=1, WAITING=2, ATTACHING=3, SYNCING=4, RESUMING=5, CLOSING=6`。`epoch` 区分掉线轮次，`transfer` 区分重试，旧连接及旧批次不能提交恢复。
+
+`FROZEN` 前的主机事件先转发给已有观战者，再通知观战者暂停。快照仅发给重连房客，采用 schema `1`、FNV-1a 32 位校验，大小上限 64 MiB；服务端验证偏移、长度与校验值。房客 `LOADED(1)`、主机 `COMMIT` 后，服务器先向所有连接排入 `RESUME`，再恢复普通事件转发。恢复期间不启动新的观战快照。
+
+主客每 2 秒发送应用心跳，服务端 20 秒未收到数据关闭该连接。等待本身不限时；单阶段 60 秒无进展或单次快照尝试超过 120 秒会退回等待。每房间 10 秒最多尝试 5 次重连码，同一连接错码后需等 2 秒。服务端重启不保留等待中的对局。
+
 ## 对战结算协议
 
 新客户端在 `SETTLE` 的元数据中上传 `game_mode=NORMAL|SHUFFLE|CLASSIC`，分别表示普通对战、刷牌模式和经典模式，不再上传 `addon_es`（拓展选卡）和 `addon_bp`（平衡调整）。服务器根据模式推导：经典模式两项均关闭，其他模式两项均开启。显式 `game_mode` 优先于旧字段；无效模式返回 `ERR`。

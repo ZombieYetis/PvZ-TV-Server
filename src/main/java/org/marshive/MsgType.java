@@ -22,7 +22,9 @@ public enum MsgType {
     SET_SPECTATE((byte) 0x0E),
     JOIN_SPECTATE((byte) 0x0F),
     SWITCH_ROLE((byte) 0x10),
-    RESERVE_SPECTATE((byte) 0x11);
+    RESERVE_SPECTATE((byte) 0x11),
+    RECONNECT_JOIN((byte) 0x12),
+    RECONNECT_READY((byte) 0x13);
 
     public final byte code;
 

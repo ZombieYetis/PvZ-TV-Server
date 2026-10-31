@@ -45,6 +45,7 @@ public class ServerIntegrationTest {
             verifyVersionStatistics(base);
             rejectControlFlood(base);
             relayRoundTrip(base);
+            reconnectRoundTrip(base);
             query(base);
             assertTrue(process.isAlive());
             assertFalse(Files.readString(log).contains("OutOfMemoryError"));
@@ -335,6 +336,60 @@ public class ServerIntegrationTest {
             assertArrayEquals(payload, guest.getInputStream().readNBytes(payload.length));
             guest.getOutputStream().write(payload);
             assertArrayEquals(payload, host.getInputStream().readNBytes(payload.length));
+        }
+    }
+
+    private byte[] rawEvent(Socket socket) throws IOException {
+        DataInputStream in = new DataInputStream(socket.getInputStream());
+        int type = in.readUnsignedByte(), size = in.readUnsignedByte();
+        if (size < 2) throw new IOException("Invalid event size");
+        byte[] data = new byte[size]; data[0] = (byte) type; data[1] = (byte) size;
+        in.readFully(data, 2, size - 2); return data;
+    }
+
+    private void reconnectRoundTrip(int base) throws Exception {
+        try (Socket host = connect(base); Socket guest = connect(base); Socket rejoined = connect(base)) {
+            host.getOutputStream().write(ByteBuffer.allocate(7).put((byte) 1).put((byte) 1)
+                    .put((byte) 'H').putInt(RelayReconnect.VERSION).array());
+            int room = ByteBuffer.wrap(frame(host, 0x81)).getInt();
+            guest.getOutputStream().write(ByteBuffer.allocate(11).put((byte) 3).putInt(room)
+                    .putInt(RelayReconnect.VERSION).put((byte) 1).put((byte) 'G').array());
+            assertEquals(1, frame(guest, 0x83)[0]);
+            host.getOutputStream().write(5);
+            byte[] relayEpoch = frame(host, 0x85); frame(guest, 0x85);
+            byte[] ready = ByteBuffer.allocate(5).put((byte) 0x0B).put(relayEpoch).array();
+            host.getOutputStream().write(ready); guest.getOutputStream().write(ready);
+            frame(host, 0x8B); frame(guest, 0x8B);
+            guest.close();
+            byte[] lost = rawEvent(host);
+            assertEquals(RelayReconnect.CONTROL, lost[0] & 255);
+            int epoch = RelayReconnect.intAt(lost, 4), transfer = RelayReconnect.intAt(lost, 8);
+            host.getOutputStream().write(RelayReconnect.control(RelayReconnect.FROZEN, 0, epoch, transfer, 1));
+            byte[] waiting = rawEvent(host);
+            assertEquals(RelayReconnect.WAITING, waiting[3]);
+            int code = RelayReconnect.intAt(waiting, 12);
+            rejoined.getOutputStream().write(ByteBuffer.allocate(10).put((byte) 0x12).putInt(room)
+                    .putInt(RelayReconnect.VERSION).put((byte) code).array());
+            byte[] paired = frame(rejoined, 0x91); assertEquals(0, paired[0]);
+            transfer = RelayReconnect.intAt(paired, 9);
+            assertEquals(RelayReconnect.ATTACHING, rawEvent(host)[3]);
+            rejoined.getOutputStream().write(ByteBuffer.allocate(9).put((byte) 0x13).putInt(epoch).putInt(transfer).array());
+            frame(rejoined, 0x92); assertEquals(RelayReconnect.SYNC, rawEvent(host)[2]);
+            byte[] data = {1,2,3,4}; int hash = 0x811c9dc5; for (byte b : data) hash = (hash ^ (b & 255)) * 16777619;
+            byte[] begin = ByteBuffer.allocate(26).put((byte) RelayReconnect.BEGIN).put((byte) 26).putInt(epoch).putInt(transfer)
+                    .putShort((short) 1).putShort((short) 76).putInt(4).putInt(hash).putInt(99).array();
+            byte[] chunk = ByteBuffer.allocate(20).put((byte) RelayReconnect.CHUNK).put((byte) 20).putInt(epoch).putInt(transfer)
+                    .putInt(0).putShort((short) 4).put(data).array();
+            byte[] end = ByteBuffer.allocate(10).put((byte) RelayReconnect.END).put((byte) 10).putInt(epoch).putInt(transfer).array();
+            for (byte[] event : new byte[][]{begin, chunk, end}) {
+                host.getOutputStream().write(event); assertArrayEquals(event, rawEvent(rejoined));
+            }
+            rejoined.getOutputStream().write(RelayReconnect.control(RelayReconnect.LOADED, 0, epoch, transfer, 1));
+            assertEquals(RelayReconnect.LOADED, rawEvent(host)[2]);
+            host.getOutputStream().write(RelayReconnect.control(RelayReconnect.COMMIT, 0, epoch, transfer, 0));
+            assertEquals(RelayReconnect.RESUME, rawEvent(host)[2]); assertEquals(RelayReconnect.RESUME, rawEvent(rejoined)[2]);
+            byte[] action = {27,5,1,0,0}; rejoined.getOutputStream().write(action); assertArrayEquals(action, rawEvent(host));
+            host.getOutputStream().write(action); assertArrayEquals(action, rawEvent(rejoined));
         }
     }
 
