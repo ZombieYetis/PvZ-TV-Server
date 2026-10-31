@@ -270,37 +270,41 @@ public class ClientHandler {
         if (room != null) {
             AnalyticsCollector.onRelayPayload(room.getId(), raw);
         }
-        relayPeer.enqueueRaw(raw);
-        mirrorRelayToSpectators(raw);
-    }
-
-    private void mirrorRelayToSpectators(byte[] raw) {
-        Room room = currentRoom;
-        if (room == null || !room.isGaming() || !room.isRelayDataOpen()) return;
-        if (isSpectator) return;
-        if (room.getHost() == null || room.getGuest() == null) return;
-
-        appendSpectatorRelayBytes(raw);
-        ArrayList<byte[]> completeEvents = drainSpectatorRelayEvents();
-        if (completeEvents.isEmpty()) {
+        if (room == null || room.getProtocolVersion() < 3214) {
+            relayPeer.enqueueRaw(raw);
+            appendSpectatorRelayBytes(raw);
+            for (byte[] event : drainSpectatorRelayEvents()) mirrorRelayEventToSpectators(event);
             return;
         }
-
-        ArrayList<ClientHandler> spectators = new ArrayList<>(room.snapshotSpectators());
-        for (byte[] event : completeEvents) {
-            for (ClientHandler s : spectators) {
-                if (s == null || s == this || s.closed) continue;
-                if (!s.spectatorStreamRequested) {
-                    continue;
-                }
-                try {
-                    s.enqueueRaw(event);
-                } catch (IOException ignored) {
-                }
+        // Keep both directions on complete event boundaries. Relay-generated snapshot
+        // requests must never be inserted in the middle of a fragmented guest event.
+        appendSpectatorRelayBytes(raw);
+        ArrayList<byte[]> events = drainSpectatorRelayEvents();
+        for (byte[] event : events) {
+            int type = event[0] & 0xFF;
+            if (type >= 240 && type <= 248) {
+                // Only the relay may request snapshots; only the host may publish snapshots or replay history.
+                if (type == 240 || !isHost) continue;
+                mirrorRelayEventToSpectators(event);
+            } else {
+                relayPeer.enqueueRaw(event);
+                mirrorRelayEventToSpectators(event);
             }
         }
     }
 
+    private void mirrorRelayEventToSpectators(byte[] event) {
+        Room room = currentRoom;
+        if (room == null || !room.isGaming() || !room.isRelayDataOpen() || isSpectator) return;
+        for (ClientHandler s : room.snapshotSpectators()) {
+            if (s == null || s.closed || !s.spectatorStreamRequested || !s.spectatorRelayOpen) continue;
+            try {
+                s.enqueueRaw(event);
+            } catch (IOException ignored) {
+                s.close();
+            }
+        }
+    }
     private void appendSpectatorRelayBytes(byte[] raw) {
         if (raw.length == 0) return;
         ensureSpectatorRelayCapacity(spectatorRelayAssembleLen + raw.length);
@@ -956,10 +960,14 @@ public class ClientHandler {
             sendError(ERR_BAD_REQ);
             return;
         }
+        if (spectatorStreamRequested && spectatorRelayOpen) return;
         spectatorStreamRequested = true;
         spectatorRelayOpen = false;
         sendReserveSpectateAck(room, true);
         sendRelayStateToSpectator(room, this);
+        if (spectatorRelayOpen && room.getProtocolVersion() >= 3214 && !room.getName().startsWith("[COOP]")) {
+            room.getHost().enqueueRaw(new byte[]{(byte) 240, 2});
+        }
     }
 
     private boolean tryBeginP2PNegotiation(Room room) {

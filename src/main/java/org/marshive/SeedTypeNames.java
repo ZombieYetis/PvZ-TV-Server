@@ -118,10 +118,11 @@ final class SeedTypeNames {
         put(99, "GIGA_GARGANTUAR");
         put(100, "DOGWALKER_ZOMBIE");
         put(101, "TELEPORTATION_ZOMBIE");
-        // Only add cards below the game's NUM_ZOMBIE_SEEDS_IN_CHOOSER.
         put(102, "CROSSING_GUARD_ZOMBIE");
         put(103, "SCIENTIST_ZOMBIE");
         put(104, "GRAVEDIGGER_ZOMBIE");
+        put(105, "SKELETON_ZOMBIE");
+        // Only add cards below the game's EXTENDED_NUM_ZOMBIE_SEEDS_IN_CHOOSER.
         put(200, "ICEBERG_LETTUCE");
         put(201, "BLOOMERANG");
         put(202, "BONK_CHOY");
@@ -131,9 +132,9 @@ final class SeedTypeNames {
         put(206, "CHILLY_PEPPER");
         put(207, "SUN_BEAN");
         put(208, "PEANUT");
-        // Stop before NUM_SEEDS_IN_CHOOSER_EXTENDED; hidden plants are excluded.
         put(209, "ENDURIAN");
         put(210, "RED_STINGER");
+        // Stop before EXTENDED_NUM_SEEDS_IN_CHOOSER; hidden plants are excluded.
 
         loadLocalizedStrings("LawnStrings.txt");
         loadLocalizedStrings("AddonStrings.txt");
