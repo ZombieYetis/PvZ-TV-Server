@@ -165,11 +165,23 @@ final class DashboardServer {
                 writeText(exchange, 404, "Not Found", "text/plain; charset=utf-8");
                 return;
             }
-            writeResource(exchange, "/assets/cards/" + name, name.endsWith(".webp") ? "image/webp" : "image/png");
+            String cacheControl = isVersionedCardImage(exchange)
+                    ? "public, max-age=31536000, immutable"
+                    : "public, max-age=0, must-revalidate";
+            writeResource(exchange, "/assets/cards/" + name, name.endsWith(".webp") ? "image/webp" : "image/png", cacheControl);
         }
     }
 
+    private static boolean isVersionedCardImage(HttpExchange exchange) {
+        String query = exchange.getRequestURI().getRawQuery();
+        return query != null && query.matches("v=[A-Za-z0-9._-]{1,64}");
+    }
+
     private static void writeResource(HttpExchange exchange, String resourcePath, String contentType) throws IOException {
+        writeResource(exchange, resourcePath, contentType, "public, max-age=0, must-revalidate");
+    }
+
+    private static void writeResource(HttpExchange exchange, String resourcePath, String contentType, String cacheControl) throws IOException {
         CachedResource cached = RESOURCES.get(resourcePath);
         if (cached == null) {
             try (InputStream resource = DashboardServer.class.getResourceAsStream(resourcePath)) {
@@ -200,7 +212,7 @@ final class DashboardServer {
         boolean compressed = cached.gzip() != null && acceptsGzip(exchange);
         String etag = '"' + cached.etag() + (compressed ? "-gzip" : "") + '"';
         exchange.getResponseHeaders().set("Content-Type", contentType);
-        exchange.getResponseHeaders().set("Cache-Control", "public, max-age=0, must-revalidate");
+        exchange.getResponseHeaders().set("Cache-Control", cacheControl);
         exchange.getResponseHeaders().set("ETag", etag);
         if (cached.gzip() != null) exchange.getResponseHeaders().set("Vary", "Accept-Encoding");
         if (compressed) exchange.getResponseHeaders().set("Content-Encoding", "gzip");
