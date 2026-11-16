@@ -14,7 +14,7 @@ public class RoomManager {
     private final Map<Integer, Room> rooms = new ConcurrentHashMap<>();
     private final AtomicInteger idGen;
     private final int shardId;
-    private final SensitiveWordFilter roomNameFilter;
+    private final PlayerNamePolicy names;
     private static final DateTimeFormatter TS_FMT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
                     .withZone(ZoneId.systemDefault());
@@ -25,7 +25,7 @@ public class RoomManager {
 
     RoomManager(int shardId, SensitiveWordFilter roomNameFilter) {
         this.shardId = shardId;
-        this.roomNameFilter = roomNameFilter;
+        this.names = new PlayerNamePolicy(roomNameFilter);
 
         // ✅ 让不同端口 roomId 不撞：高位塞 shardId
         // 例如 shardId=1 的 roomId 都 >= 0x01000000
@@ -33,9 +33,12 @@ public class RoomManager {
         this.idGen = new AtomicInteger(base + 1000);
     }
 
+    String playerName(String raw) {
+        return names.playerName(raw);
+    }
+
     public Room createRoom(String name, ClientHandler host, int protocolVersion) {
-        name = PlayerNamePolicy.truncateRoomName(name);
-        name = roomNameFilter.mask(name);
+        name = names.roomName(name);
         int id = idGen.incrementAndGet();
         Room r = new Room(id, name, host, protocolVersion);
         rooms.put(id, r);

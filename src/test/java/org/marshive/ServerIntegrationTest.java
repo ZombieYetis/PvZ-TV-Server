@@ -118,17 +118,9 @@ public class ServerIntegrationTest {
             try {
                 awaitReady(base, process);
                 try (Socket host = connect(base); Socket viewer = connect(base); Socket otherHost = connect(base)) {
-                    // Malformed UTF-8 and line breaks must not turn into names or log entries.
-                    host.getOutputStream().write(createRoomCommand(new byte[]{(byte) 0xC3, 0x28}));
-                    assertEquals(1, frame(host, 0xFF).length);
-                    host.getOutputStream().write(createRoomCommand("bad\nname".getBytes(StandardCharsets.UTF_8)));
-                    assertEquals(1, frame(host, 0xFF).length);
-                    viewer.getOutputStream().write(2);
-                    assertArrayEquals(new byte[]{0}, frame(viewer, 0x82));
-
-                    String original = custom ? "[VS]ＴｅST坏词😊" : "[VS] Ｑｑ好友😊";
+                    String original = custom ? "[VS]Ｔ\nｅST坏词😊" : "[VS] Ｑ\nｑ好友😊";
                     String expected = custom ? "[VS]******😊" : "[VS] **好友😊";
-                    byte[] create = createRoomCommand(original.getBytes(StandardCharsets.UTF_8));
+                    byte[] create = createRoomCommand(withInvalidByte(original));
                     // Exercise fragmented CREATE packets as well as the usual complete packet.
                     host.getOutputStream().write(create, 0, 5);
                     host.getOutputStream().write(create, 5, create.length - 5);
@@ -159,7 +151,7 @@ public class ServerIntegrationTest {
                 String log = new String(Files.readAllBytes(directory.resolve("server.log")), StandardCharsets.UTF_8);
                 assertTrue(log, log.contains("[ROOM_NAME_FILTER] loaded"));
                 assertFalse(log, log.contains(custom ? "ＴｅST" : "Ｑｑ"));
-                assertFalse(log, log.contains("bad\nname"));
+                assertFalse(log, log.contains(custom ? "Ｔ\nｅ" : "Ｑ\nｑ"));
                 assertTrue(log, log.contains(custom ? "[VS]******" : "[VS] **"));
             } finally {
                 process.destroyForcibly();
@@ -172,13 +164,13 @@ public class ServerIntegrationTest {
         int base = availableBase();
         Path directory = Files.createTempDirectory(Path.of("target"), "server-name-limits-").toAbsolutePath();
         Files.createDirectories(directory.resolve("words"));
-        Files.writeString(directory.resolve("words/custom.txt"), "坏");
+        Files.writeString(directory.resolve("words/custom.txt"), "坏词,对战资源站,COOP");
         Process process = startServer(base, directory, "--sensitive-words-dir=words");
         try {
             awaitReady(base, process);
             try (Socket host = connect(base); Socket guest = connect(base); Socket spectator = connect(base)) {
-                String roomName = "[COOP]阳光开心好朋";
-                host.getOutputStream().write(createRoomCommand("[COOP]阳光开心好朋友".getBytes(StandardCharsets.UTF_8)));
+                String roomName = "[COOP]爱dev1ce老霸";
+                host.getOutputStream().write(createRoomCommand("[COOP]爱dev1ce老霸对战资源站43.226.58.2".getBytes(StandardCharsets.UTF_8)));
                 int roomId = ByteBuffer.wrap(frame(host, 0x81)).getInt();
                 assertEquals(1001, roomId);
                 guest.getOutputStream().write(2);
@@ -194,28 +186,16 @@ public class ServerIntegrationTest {
                 host.getOutputStream().write(new byte[]{0x0E, 1}); // Allow spectators.
                 frame(host, 0x8E);
 
-                byte[][] invalidNames = {
-                        "bad\nname".getBytes(StandardCharsets.UTF_8),
-                        new byte[]{(byte) 0xC3, 0x28}
-                };
-                for (int command : new int[]{3, 0x0F}) {
-                    Socket client = command == 3 ? guest : spectator;
-                    for (byte[] name : invalidNames) {
-                        client.getOutputStream().write(joinRoomCommand(command, roomId, name));
-                        assertArrayEquals(new byte[]{1}, frame(client, 0xFF));
-                    }
-                }
-                // Long names are accepted; the server publishes the retained prefix everywhere.
-                String guestName = "Abcdef123456";
-                guest.getOutputStream().write(joinRoomCommand(3, roomId, (guestName + "Extra").getBytes(StandardCharsets.UTF_8)));
+                String guestName = "Abcdef1234*";
+                guest.getOutputStream().write(joinRoomCommand(3, roomId, withInvalidByte("Abcdef1234坏\n词Extra")));
                 byte[] joined = frame(guest, 0x83);
                 assertEquals(1, joined[0]);
                 assertEquals(roomName, new String(joined, 10, Byte.toUnsignedInt(joined[9]), StandardCharsets.UTF_8));
                 byte[] notification = frame(host, 0x84);
                 assertEquals(guestName, new String(notification, 5, Byte.toUnsignedInt(notification[4]), StandardCharsets.UTF_8));
 
-                String spectatorName = "阳光好友AB12";
-                spectator.getOutputStream().write(joinRoomCommand(0x0F, roomId, (spectatorName + "多余").getBytes(StandardCharsets.UTF_8)));
+                String spectatorName = "阳**友AB12";
+                spectator.getOutputStream().write(joinRoomCommand(0x0F, roomId, withInvalidByte("阳坏\u0000词友AB12多余")));
                 assertEquals(1, frame(spectator, 0x83)[0]);
                 byte[] list = frame(spectator, 0x8F);
                 assertEquals(1, list[4]);
@@ -242,6 +222,11 @@ public class ServerIntegrationTest {
             process.destroyForcibly();
             assertTrue(process.waitFor(10, TimeUnit.SECONDS));
         }
+    }
+
+    private static byte[] withInvalidByte(String name) {
+        byte[] text = name.getBytes(StandardCharsets.UTF_8);
+        return ByteBuffer.allocate(text.length + 1).put((byte) 0xff).put(text).array();
     }
 
     private static byte[] joinRoomCommand(int command, int roomId, byte[] name) {

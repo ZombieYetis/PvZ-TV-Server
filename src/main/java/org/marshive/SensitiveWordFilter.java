@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 /** Literal Unicode matching, following PvZ Ultimate's public room-name masking policy. */
@@ -28,7 +29,6 @@ final class SensitiveWordFilter {
     private static final int MAX_WORDS = 20000;
     private static final int MAX_WORD_LENGTH = 128;
     private static final int MAX_NODES = 200000;
-    private static final int MAX_NORMALIZED_LENGTH = 8192;
     private static final Pattern TEXT_ELEMENT = Pattern.compile("\\X");
     private static final List<String> BUNDLED_FILES = List.of(
             "广告.txt", "色情类.txt", "涉枪涉爆违法信息关键词.txt", "政治类.txt", "作者类.txt", "英文.txt");
@@ -131,39 +131,35 @@ final class SensitiveWordFilter {
 
     int wordCount() { return wordCount; }
 
-    String mask(String value) {
-        // CREATE already uses a one-byte UTF-8 length; keep that protocol limit unchanged.
-        if (value == null || value.length() > 255 || value.getBytes(StandardCharsets.UTF_8).length > 255) {
-            throw new IllegalArgumentException("Invalid room name length");
-        }
-        for (int point : value.codePoints().toArray()) {
-            int type = Character.getType(point);
-            if (Character.isISOControl(point) || type == Character.SURROGATE
-                    || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR) {
-                throw new IllegalArgumentException("Invalid room name character");
-            }
-        }
+    String mask(String value, int maxUnits) {
         List<String> elements = new ArrayList<>();
-        int[] normalized = new int[MAX_NORMALIZED_LENGTH];
-        int[] sources = new int[MAX_NORMALIZED_LENGTH];
-        int length = 0;
+        IntStream.Builder normalizedPoints = IntStream.builder();
+        IntStream.Builder elementIndexes = IntStream.builder();
+        int units = 0;
+        int visible = 0;
+        int visibleEnd = 0;
         Matcher matcher = TEXT_ELEMENT.matcher(value);
         while (matcher.find()) {
             String element = matcher.group();
             int index = elements.size();
             elements.add(element);
-            int[] points = normalize(element).codePoints().toArray();
-            if (length + points.length > MAX_NORMALIZED_LENGTH) throw new IllegalArgumentException("Room name normalization limit exceeded");
-            for (int point : points) {
-                normalized[length] = point;
-                sources[length++] = index;
+            units += element.codePoints().map(p -> p <= 0x7F ? 1 : 2).sum();
+            if (units <= maxUnits) {
+                visible = index + 1;
+                visibleEnd = matcher.end();
             }
+            normalize(element).codePoints().forEach(point -> {
+                normalizedPoints.add(point);
+                elementIndexes.add(index);
+            });
         }
+        int[] normalized = normalizedPoints.build().toArray();
+        int[] sources = elementIndexes.build().toArray();
         int[] coverage = new int[elements.size() + 1];
         boolean changed = false;
-        for (int start = 0; start < length; start++) {
+        for (int start = 0; start < normalized.length; start++) {
             Node node = root;
-            for (int end = start; end < Math.min(length, start + maximumWordLength); end++) {
+            for (int end = start; end < Math.min(normalized.length, start + maximumWordLength); end++) {
                 node = node.children.get(normalized[end]);
                 if (node == null) break;
                 if (node.terminal) {
@@ -173,10 +169,10 @@ final class SensitiveWordFilter {
                 }
             }
         }
-        if (!changed) return value;
+        if (!changed) return value.substring(0, visibleEnd);
         StringBuilder result = new StringBuilder(value.length());
         int active = 0;
-        for (int i = 0; i < elements.size(); i++) {
+        for (int i = 0; i < visible; i++) {
             active += coverage[i];
             result.append(active > 0 ? "*" : elements.get(i));
         }
@@ -185,7 +181,7 @@ final class SensitiveWordFilter {
 
     private static String normalize(String value) {
         return Normalizer.normalize(value, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT)
-                .replace("ß", "ss").replace('ς', 'σ');
+                .replace("\u200D", "").replace("\uFE0E", "").replace("\uFE0F", "").replace("ß", "ss").replace('ς', 'σ');
     }
 
     private static final class Node {

@@ -123,6 +123,7 @@ final class SeedTypeNames {
         put(103, "SCIENTIST_ZOMBIE");
         put(104, "GRAVEDIGGER_ZOMBIE");
         put(105, "SKELETON_ZOMBIE");
+        put(106, "PIGEON_FEEDER_ZOMBIE");
         // Only add cards below the game's EXTENDED_NUM_ZOMBIE_SEEDS_IN_CHOOSER.
         put(200, "ICEBERG_LETTUCE");
         put(201, "BLOOMERANG");

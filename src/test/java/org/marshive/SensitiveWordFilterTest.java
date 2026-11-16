@@ -14,34 +14,39 @@ import static org.junit.Assert.*;
 public class SensitiveWordFilterTest {
     @Rule public TemporaryFolder temporary = new TemporaryFolder();
 
+    private static String mask(SensitiveWordFilter filter, String value) {
+        return filter.mask(value, Integer.MAX_VALUE);
+    }
+
     @Test public void masksChineseFullWidthCaseAndOverlappingTerms() throws Exception {
         SensitiveWordFilter filter = new SensitiveWordFilter(List.of("test", "坏词", "abc", "bcde"));
-        assertEquals("[VS] **房 ****", filter.mask("[VS] 坏词房 ＴｅＳＴ"));
-        assertEquals("*****", filter.mask("abcde"));
-        assertEquals("****-****", filter.mask("test-TEST"));
-        assertEquals("[COOP] 阳光😀 123", filter.mask("[COOP] 阳光😀 123"));
+        assertEquals("[VS] **房 ****", mask(filter, "[VS] 坏词房 ＴｅＳＴ"));
+        assertEquals("*****", mask(filter, "abcde"));
+        assertEquals("****-****", mask(filter, "test-TEST"));
+        assertEquals("[COOP] 阳光😀 123", mask(filter, "[COOP] 阳光😀 123"));
     }
 
     @Test public void normalizationMasksWholeTextElementsWithoutDamagingOtherEmoji() throws Exception {
         SensitiveWordFilter filter = new SensitiveWordFilter(List.of("é", "ss", "σ", "ff", "👩🏽‍💻"));
-        assertEquals("*房", filter.mask("e\u0301房"));
-        assertEquals("*房", filter.mask("ß房"));
-        assertEquals("***", filter.mask("Σσς"));
-        assertEquals("*房", filter.mask("\uFB03房"));
-        assertEquals("👨‍👩‍👧‍👦 *", filter.mask("👨‍👩‍👧‍👦 👩🏽‍💻"));
-        String masked = filter.mask("[VS] 👩🏽‍💻 é");
+        assertEquals("*房", mask(filter, "e\u0301房"));
+        assertEquals("*房", mask(filter, "ß房"));
+        assertEquals("***", mask(filter, "Σσς"));
+        assertEquals("*房", mask(filter, "\uFB03房"));
+        assertEquals("👨‍👩‍👧‍👦 *", mask(filter, "👨‍👩‍👧‍👦 👩🏽‍💻"));
+        String masked = mask(filter, "[VS] 👩🏽‍💻 é");
         assertTrue(masked.getBytes(StandardCharsets.UTF_8).length <= "[VS] 👩🏽‍💻 é".getBytes(StandardCharsets.UTF_8).length);
     }
 
     @Test public void bundledDictionaryIsUsableWithoutExternalFiles() {
         SensitiveWordFilter filter = SensitiveWordFilter.bundled();
         assertTrue(filter.wordCount() > 100);
-        assertEquals("[VS] **房间", filter.mask("[VS] Ｑｑ房间"));
-        assertEquals("***房", filter.mask("制作组房"));
-        assertEquals("[VS]****", filter.mask("[VS]ＤｉＣｋ"));
-        assertEquals("**** **** ***** ***", filter.mask("ShIt FUCK PuSsY ass"));
-        assertEquals("***** ******", filter.mask("NiGgA NIGGER"));
-        assertEquals("******* ************", filter.mask("ASSHOLE motherfucker"));
+        assertEquals("*****", mask(filter, "对战资源站"));
+        assertEquals("[VS] **房间", mask(filter, "[VS] Ｑｑ房间"));
+        assertEquals("***房", mask(filter, "制作组房"));
+        assertEquals("[VS]****", mask(filter, "[VS]ＤｉＣｋ"));
+        assertEquals("**** **** ***** ***", mask(filter, "ShIt FUCK PuSsY ass"));
+        assertEquals("***** ******", mask(filter, "NiGgA NIGGER"));
+        assertEquals("******* ************", mask(filter, "ASSHOLE motherfucker"));
         assertNotNull(SensitiveWordFilter.class.getResource("/sensitive_words/LICENSE"));
     }
 
@@ -52,7 +57,7 @@ public class SensitiveWordFilterTest {
         Files.writeString(directory.resolve("ignored.md"), "普通");
         SensitiveWordFilter filter = SensitiveWordFilter.fromDirectory(directory);
         assertEquals(3, filter.wordCount());
-        assertEquals("** **** *** 普通", filter.mask("坏词 test 第二词 普通"));
+        assertEquals("** **** *** 普通", mask(filter, "坏词 test 第二词 普通"));
     }
 
     @Test public void rejectsMissingEmptyAndMalformedDictionaries() throws Exception {
@@ -84,10 +89,6 @@ public class SensitiveWordFilterTest {
     @Test public void manyOverlappingMatchesAndMaximumProtocolLengthStayBounded() throws Exception {
         SensitiveWordFilter filter = new SensitiveWordFilter(IntStream.rangeClosed(1, 128)
                 .mapToObj(i -> "a".repeat(i)).toList());
-        assertEquals("*".repeat(255), filter.mask("a".repeat(255)));
-        assertThrows(IllegalArgumentException.class, () -> filter.mask("a".repeat(256)));
-        assertThrows(IllegalArgumentException.class, () -> filter.mask("花".repeat(86)));
-        assertThrows(IllegalArgumentException.class, () -> filter.mask("房\n间"));
-        assertThrows(IllegalArgumentException.class, () -> filter.mask("\uD800"));
+        assertEquals("*".repeat(255), mask(filter, "a".repeat(255)));
     }
 }
