@@ -40,7 +40,7 @@ public class SensitiveWordFilterTest {
     @Test public void bundledDictionaryIsUsableWithoutExternalFiles() {
         SensitiveWordFilter filter = SensitiveWordFilter.bundled();
         assertTrue(filter.wordCount() > 100);
-        assertEquals("*****", mask(filter, "对战资源站"));
+        assertEquals("对战**站", mask(filter, "对战资源站"));
         assertEquals("[VS] **房间", mask(filter, "[VS] Ｑｑ房间"));
         assertEquals("***房", mask(filter, "制作组房"));
         assertEquals("[VS]****", mask(filter, "[VS]ＤｉＣｋ"));

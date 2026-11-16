@@ -79,29 +79,6 @@ sudo systemctl start pvz-tv-server
 
 主动 `systemctl stop` 不会触发自动重启。模板没有设置 `WatchdogSec`，因为应用没有实现 systemd 的 `sd_notify` 协议；主循环检测由应用内看门狗完成。
 
-## 在线清理指定版本的对局
-
-`delete_matches_by_version.py` 使用 Python 3 标准库，可在服务运行时执行。它要求已有数据库使用 WAL 模式，不自动切换日志模式。默认只预览：
-
-```bash
-python3 /root/delete_matches_by_version.py --db /root/data/pvz_metrics.db --version 3217
-```
-
-通过 WinSCP 将本目录的脚本上传到 `/root/`，确认数据库路径后执行：
-
-```bash
-python3 /root/delete_matches_by_version.py --db /root/data/pvz_metrics.db --version 3217 --apply --batch-size 20 --pause 0.25
-```
-
-- 先调用 [SQLite 在线备份 API](https://www.sqlite.org/backup.html) 分页复制，每 128 页稍作暂停，不在备份期间占用写事务。备份通过完整性检查后才命名为 `.bak`；失败的 `.partial` 文件不能当成完整备份。备份保存在数据库同目录，需预留足够磁盘空间。
-- 启动时打印并固定 `Cutoff ID`。只删除备份中版本匹配且 ID 不超过该值的对局、关联明细及累计统计；清理期间新上传的对局，包括同版本对局，保留。
-- 默认每批最多 20 局，提交后暂停 0.25 秒。写锁忙时每次最多等待 50 毫秒，释放连接上的事务后退让重试，连续繁忙 30 秒则停止。批内 SQL 和统计计算设 200 毫秒目标预算，超时回滚并减小批次；单局仍过慢则停止。磁盘 I/O、提交和回滚耗时无法硬性保证，因此不能保证线上零延迟。可用 `--batch-size 5 --pause 0.5` 进一步降低影响。
-- 不运行 `VACUUM` 或强制 checkpoint，当前连接也不触发自动 checkpoint；删除后数据库文件可能不会立即缩小，空闲页可供后续结算复用。
-- 每批独立提交。Ctrl+C 或出错只回滚当前批次，之前完成的删除保留。重跑时加上原输出中的 `--cutoff-id 数字` 可保持原清理范围；不指定会重新计算截止 ID。每次正式执行都会重新备份。
-- 备份完成后产生的新记录不在原备份中，因此不要直接用旧备份覆盖在线数据库；需要恢复时应先停止服务并核对增量数据。
-
-本地测试只使用临时数据库，覆盖在线备份时结算写入、批次间写入、写锁重试、慢批次回滚降档、部分成功后续跑及其他版本保留。
-
 ## 故障诊断与验证
 
 - 堆溢出时，JVM 尝试写入 `/var/log/pvz-tv-server/heapdump.hprof`，随后退出；转储需要时间，systemd 在进程实际退出后才会重启。操作系统 OOM kill 不保证生成 Java 堆转储。

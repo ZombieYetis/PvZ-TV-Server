@@ -1,4 +1,4 @@
-﻿[COOP_FINAL_BOSS_HARD]
+[COOP_FINAL_BOSS_HARD]
 结盟 僵王博士困难
 
 [CACTUS_TOOLTIP_VS]
@@ -259,6 +259,9 @@
 [SKELETON_ZOMBIE]
 骷髅僵尸
 
+[PIGEON_FEEDER_ZOMBIE]
+喂鸽僵尸
+
 [ZOMBIE_MOUND]
 召唤墓碑
 
@@ -348,6 +351,9 @@
 [SKELETON_ZOMBIE_DESCRIPTION_HEADER]
 死亡后留下骨堆，
 一段时间后重生
+
+[PIGEON_FEEDER_ZOMBIE_DESCRIPTION_HEADER]
+每隔一段时间在周围召唤一群僵尸鸽子
 
 [THRILLER_NIGHT]
 颤栗舞步，亡者复生！
@@ -1122,6 +1128,21 @@ D个痛快
 
 [LIVE_SPECTATE_WAIT_NEXT]
 当前对局尚未开始或已结束，等待下一局…
+
+[SPECTATE_SNAPSHOT_FAILED_TITLE]
+无法进入观战
+
+[SPECTATE_SNAPSHOT_RESOURCE_MISMATCH]
+对局动画资源与本机不兼容，无法恢复当前对局。已返回联机大厅，请检查双方使用的资源包后重试。
+
+[SPECTATE_SNAPSHOT_LOAD_FAILED]
+无法恢复当前对局数据，已返回联机大厅。请确认双方游戏和资源版本一致后重试。
+
+[SPECTATE_SNAPSHOT_TIMEOUT]
+接收当前对局数据超时，已返回联机大厅。请检查网络后重新进入房间。
+
+[SPECTATE_SNAPSHOT_TRANSFER_FAILED]
+当前对局数据接收或校验失败，已返回联机大厅。请重新进入房间尝试观战。
 
 [REPLAY_PLAY]
 播放

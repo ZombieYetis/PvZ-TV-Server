@@ -291,7 +291,8 @@ public class ServerIntegrationTest {
         String names = httpGet(base + 4000, "/api/seed-names");
         assertTrue(names.contains("\"seed_type\":209,\"en\":\"ENDURIAN\",\"zh\":\"榴莲\""));
         assertTrue(names.contains("\"seed_type\":102,\"en\":\"CROSSING_GUARD_ZOMBIE\",\"zh\":\"交通协管僵尸\""));
-        for (int excluded : new int[]{106, 107, 108, 109, 110, 111, 112, 211, 212}) {
+        assertTrue(names.contains("\"seed_type\":106,\"en\":\"PIGEON_FEEDER_ZOMBIE\",\"zh\":\"喂鸽僵尸\""));
+        for (int excluded : new int[]{107, 108, 109, 110, 111, 112, 211, 212}) {
             assertFalse(names.contains("\"seed_type\":" + excluded + ","));
         }
 
