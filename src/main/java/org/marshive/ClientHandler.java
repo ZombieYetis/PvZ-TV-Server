@@ -1192,7 +1192,7 @@ public class ClientHandler {
         spectatorRelayOpen = false;
         sendReserveSpectateAck(room, true);
         sendRelayStateToSpectator(room, this);
-        if (spectatorRelayOpen && room.getProtocolVersion() >= 3214 && !room.getName().startsWith("[COOP]")) {
+        if (spectatorRelayOpen && room.getProtocolVersion() >= (room.getName().startsWith("[COOP]") ? 3225 : 3214)) {
             room.getHost().enqueueRaw(new byte[]{(byte) 240, 2});
         }
     }

@@ -24,8 +24,11 @@ public class LiveSpectateTest {
         handlers.add(h); return h;
     }
     private void setup(int version) throws Exception {
+        setup(version, "[VS]test");
+    }
+    private void setup(int version, String name) throws Exception {
         host = handler(hostWire); guest = handler(guestWire);
-        room = new Room(1, "[VS]test", host, version); room.setGuest(guest);
+        room = new Room(1, name, host, version); room.setGuest(guest);
         room.setGaming(true); room.setRelayMode(true); room.setRelayEpoch(1); room.setRelayDataOpen(true);
         set(host, "currentRoom", room); set(guest, "currentRoom", room);
         set(host, "isHost", true);
@@ -76,6 +79,28 @@ public class LiveSpectateTest {
         assertArrayEquals(new byte[]{(byte) 240, 2, (byte) 240, 2}, drain(host, hostWire));
         room = new Room(2, "[VS]old", host, 3213); room.setGuest(guest);
         room.setGaming(true); room.setRelayMode(true); room.setRelayEpoch(1); room.setRelayDataOpen(true);
+        join(new TestChannel());
+        assertArrayEquals(new byte[0], drain(host, hostWire));
+    }
+    @Test public void coopRoomsRequestLiveSnapshot() throws Exception {
+        setup(3225, "[COOP]live");
+        var wire = new TestChannel(); var spectator = join(wire);
+        assertArrayEquals(new byte[]{(byte) 240, 2}, drain(host, hostWire));
+
+        byte[] begin = {(byte) 241, 12, 0, 0, 16, 0, 0, 0, 1, 2, 3, 4};
+        byte[] chunk = new byte[244]; chunk[0] = (byte) 242; chunk[1] = (byte) 244; chunk[2] = 16;
+        chunk[4] = 79; // Cooperative day mode at the start of the snapshot.
+        byte[] done = {(byte) 243, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        byte[] live = {12, 2};
+        var expected = new ByteArrayOutputStream();
+        for (byte[] event : new byte[][]{begin, chunk, done, live}) {
+            send(host, hostWire, event); expected.write(event);
+        }
+        assertArrayEquals(expected.toByteArray(), drain(spectator, wire));
+        assertArrayEquals(live, drain(guest, guestWire));
+    }
+    @Test public void oldCoopRoomsKeepQueueing() throws Exception {
+        setup(3224, "[COOP]old");
         join(new TestChannel());
         assertArrayEquals(new byte[0], drain(host, hostWire));
     }
