@@ -15,6 +15,9 @@
     request: 0
   };
   const palette = ["#6b963c", "#d49931", "#7584ad", "#c45e35", "#42a09a", "#a1ad4c", "#aa7250", "#4d815d", "#cf8e51", "#8888a1"];
+  const CARD_IMAGE_VERSION = "pvz-release-20261106-7";
+  let deckImageObserver = null;
+  let cardStatsImageObserver = null;
   const text = {
     zh: { title:"对战大数据", version:"游戏版本", all:"全部版本", ban:"禁选模式", extra:"额外卡槽", off:"关闭", on:"开启", map:"地图", maps:["白天","黑夜","泳池白天","泳池黑夜"], plant:"植物", zombie:"僵尸", deckTitle:"Top 10 卡组", cardTitle:"单卡统计", recent:"最近对局", time:"时间", winner:"胜方", duration:"时长", card:"卡牌", pick:"选取", banCol:"禁用", wins:"胜场", winrate:"胜率", pickrate:"选取率", banrate:"禁用率", plays:"对局", noData:"暂无数据", waiting:"等待对局数据", records:"条卡牌记录", lineups:"组卡组", loading:"加载中…", returnHome:"返回资料站首页", allLabel:"Top 10 对局", latest:"近期", auto:"新对局数据自动更新" },
     en: { title:"Battle Data", version:"Game version", all:"All versions", ban:"Ban mode", extra:"Extra slot", off:"Off", on:"On", map:"Map", maps:["Day","Night","Pool day","Pool fog"], plant:"Plants", zombie:"Zombies", deckTitle:"Top 10 Decks", cardTitle:"Card Stats", recent:"Recent Matches", time:"Time", winner:"Winner", duration:"Duration", card:"Card", pick:"Picked", banCol:"Banned", wins:"Wins", winrate:"Win rate", pickrate:"Pick rate", banrate:"Ban rate", plays:"Plays", noData:"No data", waiting:"Waiting for match data", records:"card records", lineups:"deck lineups", loading:"Loading…", returnHome:"Back to home", allLabel:"Top 10 matches", latest:"LATEST", auto:"Live match data updates automatically" }
@@ -33,10 +36,34 @@
   const cardImagePath = seedType => {
     const id = Number(seedType);
     const file = id === 91
-      ? `SEED_PACKET_91_MOUND_LEVEL_0.PNG`
-      : `SEED_PACKET_${String(id).padStart(2, "0")}.PNG`;
-    return `/assets/cards/${file}`;
+      ? "SEED_PACKET_91_MOUND_LEVEL_0.webp"
+      : `SEED_PACKET_${String(id).padStart(2, "0")}.webp`;
+    return `/assets/cards/${file}?v=${CARD_IMAGE_VERSION}`;
   };
+
+  function createImageObserver(root) {
+    if (!root || typeof IntersectionObserver === "undefined") return null;
+    return new IntersectionObserver((entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const image = entry.target;
+        image.src = image.dataset.src;
+        delete image.dataset.src;
+        observer.unobserve(image);
+      }
+    }, { root, rootMargin: "96px 0px" });
+  }
+
+  function observeImage(image, src, observer) {
+    image.loading = "lazy";
+    image.decoding = "async";
+    if (observer) {
+      image.dataset.src = src;
+      observer.observe(image);
+    } else {
+      image.src = src;
+    }
+  }
 
   function labels() {
     const words = t();
@@ -89,6 +116,8 @@
     const list = $("#deckList");
     const chart = $("#pie");
     const content = $(".deck-content");
+    deckImageObserver?.disconnect();
+    deckImageObserver = null;
     list.replaceChildren();
     $("#deckCount").textContent = `${decks.length} ${t().lineups}`;
     if (!decks.length) {
@@ -102,7 +131,8 @@
     }
     content.classList.remove("is-empty");
     chart.hidden = false;
-    const producerId = state.side === "ZOMBIE" ? 61 : ["NIGHT", "FOG"].includes(state.mode) ? 9 : 1;
+    deckImageObserver = createImageObserver(list);
+    const producerId = state.side === "ZOMBIE" ? 61 : 0;
     decks.forEach((deck, index) => {
       const row = document.createElement("li");
       row.className = "deck-row";
@@ -132,13 +162,11 @@
       ids.forEach((id, cardIndex) => {
         const image = document.createElement("img");
         image.className = "deck-card";
-        image.src = cardImagePath(id);
+        observeImage(image, cardImagePath(id), deckImageObserver);
         image.alt = names[cardIndex];
         image.title = names[cardIndex];
         image.width = 48;
         image.height = 68;
-        image.loading = "lazy";
-        image.decoding = "async";
         cards.append(image);
       });
       const marker = document.createElement("i");
@@ -164,6 +192,8 @@
 
   function renderCards(items) {
     const body = $("#cards tbody");
+    cardStatsImageObserver?.disconnect();
+    cardStatsImageObserver = createImageObserver(body.closest(".table-wrap"));
     body.replaceChildren();
     const banned = state.ban === "true";
     const headers = [t().card, t().pick, ...(banned ? [t().banCol] : []), t().wins, t().winrate, t().pickrate, ...(banned ? [t().banrate] : [])];
@@ -187,12 +217,10 @@
           name.textContent = value;
           const image = document.createElement("img");
           image.className = "seed-thumb";
-          image.src = cardImagePath(item.seed_type);
+          observeImage(image, cardImagePath(item.seed_type), cardStatsImageObserver);
           image.alt = `${value}卡图`;
           image.width = 34;
           image.height = 48;
-          image.loading = "lazy";
-          image.decoding = "async";
           image.addEventListener("error", () => image.hidden = true, { once: true });
           const content = document.createElement("span");
           content.className = "seed-cell";

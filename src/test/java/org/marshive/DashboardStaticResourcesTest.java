@@ -103,4 +103,26 @@ public class DashboardStaticResourcesTest {
             missing.disconnect();
         }
     }
+
+    @Test
+    public void versionedCardImagesUseImmutableCaching() throws Exception {
+        String path = "/assets/cards/SEED_PACKET_00.webp?v=pvz-release-20261106-6";
+        HttpURLConnection image = request(path, null, null);
+        assertEquals(200, image.getResponseCode());
+        assertEquals("image/webp", image.getHeaderField("Content-Type"));
+        assertEquals("public, max-age=31536000, immutable", image.getHeaderField("Cache-Control"));
+        String etag = image.getHeaderField("ETag");
+        assertTrue(image.getInputStream().readAllBytes().length > 0);
+        image.disconnect();
+
+        HttpURLConnection unchanged = request(path, null, etag);
+        assertEquals(304, unchanged.getResponseCode());
+        assertEquals("public, max-age=31536000, immutable", unchanged.getHeaderField("Cache-Control"));
+        unchanged.disconnect();
+
+        HttpURLConnection unversioned = request("/assets/cards/SEED_PACKET_00.webp", null, null);
+        assertEquals(200, unversioned.getResponseCode());
+        assertEquals("public, max-age=0, must-revalidate", unversioned.getHeaderField("Cache-Control"));
+        unversioned.disconnect();
+    }
 }
