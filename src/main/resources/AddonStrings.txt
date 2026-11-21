@@ -77,6 +77,13 @@
 靠近大本营时火力全开发射子弹，
 远离老家则会提升防御性
 
+[LIGHTNING_REED]
+闪电芦苇
+
+[LIGHTNING_REED_TOOLTIP]
+对最近的僵尸发射闪电，并且其
+电压会形成电弧扫过附近的僵尸
+
 [AKEE]
 阿开木木
 
@@ -1178,13 +1185,9 @@ D个痛快
 玩家连接中断，正在等待重连。
 恢复后将继续观战。
 
-[RECONNECT_HOST_CODE_FMT]
-重连码：%02d
-请对方重新加入原房间并输入重连码。
-%s
-
 [RECONNECT_WAITING]
 正在等待对方重连……
+请对方重新加入原房间。
 
 [RECONNECT_SYNCING]
 正在连接并同步对局，请稍候……
@@ -1207,8 +1210,8 @@ D个痛快
 [STATUS_RECONNECT_UNAVAILABLE]
 房间暂时不能重连
 
-[STATUS_RECONNECT_CODE_WRONG]
-重连码错误
+[STATUS_RECONNECT_ID_MISMATCH]
+玩家身份不匹配，请使用原存档重连
 
 [STATUS_RECONNECT_FAILED]
 重连失败
@@ -1225,14 +1228,5 @@ D个痛快
 [STATUS_RECONNECT_BUSY]
 对方正在重连，请稍候
 
-[INPUT_TITLE_RECONNECT_CODE]
-输入重连码
-
-[HINT_RECONNECT_CODE]
-请输入主机窗口上的两位数字，例如 07
-
-[STATUS_RECONNECT_CODE_INVALID]
-重连码必须是两位数字
-
 [STATUS_RECONNECT_VERIFYING]
-正在验证重连码……
+正在验证玩家身份……

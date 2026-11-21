@@ -18,6 +18,8 @@ public class ReconnectTest {
     private final Map<ClientHandler, TestChannel> wires = new HashMap<>();
     private ClientHandler host, guest, viewer;
     private Room room;
+    private static final UUID GUEST_ID = UUID.fromString("ba1a2c90-c077-4a84-8809-6e23c5834265");
+    private static final UUID OTHER_ID = UUID.fromString("d0e1d739-e7c4-425a-a2d4-cdcd6b8bf6e5");
     private static void set(ClientHandler h, String name, Object value) throws Exception {
         var f = ClientHandler.class.getDeclaredField(name); f.setAccessible(true); f.set(h, value);
     }
@@ -28,13 +30,15 @@ public class ReconnectTest {
     }
     @Before public void setup() throws Exception {
         host = client(); guest = client(); viewer = client();
-        room = rooms.createRoom("[VS]reconnect", host, VERSION);
+        room = rooms.createRoom("[VS]reconnect", host, PLAYER_ID_VERSION);
         room.setGuest(guest); room.setGaming(true); room.setRelayMode(true); room.setRelayDataOpen(true); room.setRelayEpoch(1);
         for (ClientHandler h : List.of(host, guest, viewer)) set(h, "currentRoom", room);
         set(host, "isHost", true);
         set(host, "relayDataMode", true); set(guest, "relayDataMode", true);
         set(host, "relayPeer", guest); set(guest, "relayPeer", host);
         set(guest, "playerName", "original guest");
+        set(guest, "playerId", GUEST_ID);
+        set(viewer, "playerId", OTHER_ID);
         set(viewer, "isSpectator", true); set(viewer, "spectatorStreamRequested", true); set(viewer, "spectatorRelayOpen", true);
         room.addSpectator(viewer);
     }
@@ -57,15 +61,54 @@ public class ReconnectTest {
         send(host, ctl(FROZEN, 1));
         assertEquals(WAITING, room.reconnect.state);
         byte[] state = drain(host);
-        assertEquals(room.reconnect.code, intAt(state, 12));
-        assertEquals(-1, intAt(drain(viewer), 12)); // Never disclose the code to viewers.
+        assertEquals(GUEST_ID, room.reconnect.guestId);
+        assertEquals(0, intAt(state, 12));
+        assertEquals(0, intAt(drain(viewer), 12));
     }
-    private byte[] joinRequest(int code) {
-        return ByteBuffer.allocate(10).put((byte) 0x12).putInt(room.getId()).putInt(VERSION).put((byte) code).array();
+    private byte[] joinRequest(UUID identity) {
+        return ByteBuffer.allocate(25).put((byte) 0x12).putInt(room.getId()).putInt(PLAYER_ID_VERSION)
+                .putLong(identity.getMostSignificantBits()).putLong(identity.getLeastSignificantBits()).array();
     }
+
+    @Test public void fragmentedIdentityRegistrationAndRoleSwitchKeepTheCorrectPlayer() throws Exception {
+        for (String mode : List.of("[VS]", "[COOP]")) {
+            var owner = client(); var player = client(); var spectator = client();
+            byte[] name = (mode + "host").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] create = ByteBuffer.allocate(6 + name.length + 16).put((byte) 1).put((byte) name.length).put(name)
+                    .putInt(PLAYER_ID_VERSION).putLong(1).putLong(2).array();
+            for (int i = 0; i < create.length - 1; ++i) send(owner, create[i]);
+            assertEquals(1, rooms.roomCount()); // Incomplete identity must not create a room yet.
+            send(owner, create[create.length - 1]);
+            Room added = rooms.getRoom(intAt(drain(owner), 3));
+            added.setSpectateAllowed(true);
+            for (ClientHandler client : List.of(player, spectator)) {
+                boolean watching = client == spectator;
+                UUID id = watching ? OTHER_ID : GUEST_ID;
+                byte[] join = ByteBuffer.allocate(27).put((byte) (watching ? 0x0f : 3)).putInt(added.getId())
+                        .putInt(PLAYER_ID_VERSION).put((byte) 1).put((byte) 'G')
+                        .putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits()).array();
+                for (int i = 0; i < join.length - 1; ++i) send(client, join[i]);
+                assertEquals(0, drain(client).length);
+                send(client, join[join.length - 1]);
+                assertEquals(0x83, drain(client)[0] & 255);
+                // A rejected second JOIN must not replace an already bound identity.
+                join[join.length - 1] ^= 1;
+                send(client, join); assertEquals(0xff, drain(client)[0] & 255);
+            }
+            send(player, (byte) 7); drain(player);
+            send(spectator, (byte) 0x10, (byte) 0); drain(spectator);
+            assertSame(spectator, added.getGuest());
+            added.setGaming(true); added.setRelayMode(true);
+            spectator.close();
+            assertEquals(FREEZING, added.reconnect.state);
+            assertEquals(OTHER_ID, added.reconnect.guestId);
+            owner.close();
+        }
+    }
+
     private ClientHandler attach() throws Exception {
         ClientHandler next = client();
-        for (byte b : joinRequest(room.reconnect.code)) send(next, b); // fragmented lobby command
+        for (byte b : joinRequest(GUEST_ID)) send(next, b); // fragmented lobby command
         assertEquals(ATTACHING, room.reconnect.state);
         byte[] result = drain(next); assertEquals(0x91, result[0] & 255); assertEquals(0, result[3]);
         drain(host);
@@ -94,7 +137,7 @@ public class ReconnectTest {
         return out.toByteArray();
     }
     @Test public void reconnectKeepsRoomAndRequiresSnapshotAndCommitBeforeGameplay() throws Exception {
-        waitForReconnect(); room.reconnect.code = 7;
+        waitForReconnect();
         ClientHandler next = attach();
         send(next, (byte) 27, (byte) 2); assertArrayEquals(new byte[0], drain(host));
         send(next, ctl(LOADED, 1)); assertEquals(SYNCING, room.reconnect.state); // too early
@@ -104,7 +147,7 @@ public class ReconnectTest {
         assertEquals(RESUMING, room.reconnect.state);
         send(host, ctl(COMMIT, 0));
         for (ClientHandler h : List.of(host, next, viewer)) assertEquals(RESUME, drain(h)[2]);
-        assertEquals(NONE, room.reconnect.state); assertSame(next, room.getGuest()); assertEquals(-1, room.reconnect.code);
+        assertEquals(NONE, room.reconnect.state); assertSame(next, room.getGuest()); assertEquals(GUEST_ID, room.reconnect.guestId);
         byte[] action = {27, 5, 1, 0, 0}; send(next, action);
         assertArrayEquals(action, drain(host)); assertArrayEquals(action, drain(viewer));
         send(host, action); assertArrayEquals(action, drain(next));
@@ -119,22 +162,41 @@ public class ReconnectTest {
         assertArrayEquals(new byte[]{27, 5, 1, 0, 0}, Arrays.copyOf(bytes, 5));
         assertEquals(CONTROL, bytes[5] & 255); assertEquals(WAITING, bytes[8]);
     }
-    @Test public void wrongCodeAndCompetingJoinCannotReplaceCandidate() throws Exception {
+    @Test public void wrongIdentityAndCompetingJoinCannotReplaceCandidate() throws Exception {
         waitForReconnect(); var bad = client();
-        send(bad, joinRequest((room.reconnect.code + 1) % 100)); assertEquals(3, drain(bad)[3]);
+        set(bad, "playerName", "original guest"); // Matching names do not grant access.
+        send(bad, joinRequest(OTHER_ID)); assertEquals(3, drain(bad)[3]);
         assertNull(room.reconnect.candidate); assertEquals(WAITING, room.reconnect.state);
         var first = attach(); var second = client();
-        send(second, joinRequest(room.reconnect.code)); assertEquals(2, drain(second)[3]);
+        send(second, joinRequest(GUEST_ID)); assertEquals(2, drain(second)[3]);
         assertSame(first, room.reconnect.candidate);
     }
-    @Test public void secondDropRetainsCodeAndIgnoresOldTransfer() throws Exception {
-        waitForReconnect(); int code = room.reconnect.code; var first = attach();
+    @Test public void secondDropRetainsIdentityAndIgnoresOldTransfer() throws Exception {
+        waitForReconnect(); var first = attach();
         byte[] oldBegin = begin(new byte[]{1}); int oldTransfer = room.reconnect.transfer;
-        first.close(); assertEquals(WAITING, room.reconnect.state); assertEquals(code, room.reconnect.code); drain(host);
+        first.close(); assertEquals(WAITING, room.reconnect.state); assertEquals(GUEST_ID, room.reconnect.guestId); drain(host);
         var second = attach(); assertNotEquals(oldTransfer, room.reconnect.transfer);
         send(host, oldBegin); assertArrayEquals(new byte[0], drain(second));
         assertArrayEquals(snapshot(), drain(second));
     }
+    @Test public void identitySurvivesSuccessfulReconnectAndAnotherDisconnect() throws Exception {
+        waitForReconnect(); var next = attach(); finishReconnect(next);
+        set(next, "playerName", "renamed");
+        next.close(); drain(host); send(host, ctl(FROZEN, 1)); drain(host); drain(viewer);
+        assertEquals(GUEST_ID, room.reconnect.guestId);
+        assertEquals("renamed", room.reconnect.guestName);
+        finishReconnect(attach());
+    }
+
+    @Test public void legacyReconnectRequestIsRejectedWithoutConsumingFollowingQuery() throws Exception {
+        waitForReconnect(); var old = client();
+        send(old, ByteBuffer.allocate(11).put((byte) 0x12).putInt(room.getId()).putInt(VERSION).put((byte) 7).put((byte) 2).array());
+        byte[] response = drain(old);
+        assertEquals(0x91, response[0] & 255); assertEquals(5, response[3]);
+        assertEquals(0x82, response[16] & 255);
+        assertEquals(WAITING, room.reconnect.state);
+    }
+
     @Test public void corruptSnapshotOnlyClosesCandidateAndAllowsRetry() throws Exception {
         waitForReconnect(); var next = attach();
         send(host, begin(new byte[]{1,2})); send(host, chunk(new byte[]{2,1})); send(host, end());
@@ -146,7 +208,7 @@ public class ReconnectTest {
         send(host, ctl(CANCEL, 0));
         assertTrue(host.isClosed()); assertTrue(next.isClosed()); assertTrue(viewer.isClosed());
         assertNull(rooms.getRoom(room.getId()));
-        var late = client(); send(late, joinRequest(0)); assertEquals(1, drain(late)[3]);
+        var late = client(); send(late, joinRequest(GUEST_ID)); assertEquals(1, drain(late)[3]);
     }
     @Test public void candidateTimeoutReturnsToWaitingWithoutClosingHost() throws Exception {
         waitForReconnect(); var next = attach();
@@ -197,11 +259,11 @@ public class ReconnectTest {
     }
 
     @Test public void clientLoadFailureCanRetryAndResumeExistingViewer() throws Exception {
-        waitForReconnect(); int originalCode = room.reconnect.code;
+        waitForReconnect();
         var failed = attach(); snapshot(); drain(failed);
         send(failed, ctl(LOADED, 0));
         assertTrue(failed.isClosed()); assertFalse(host.isClosed()); assertFalse(viewer.isClosed());
-        assertEquals(WAITING, room.reconnect.state); assertEquals(originalCode, room.reconnect.code);
+        assertEquals(WAITING, room.reconnect.state); assertEquals(GUEST_ID, room.reconnect.guestId);
         drain(host);
         finishReconnect(attach());
     }
@@ -217,7 +279,7 @@ public class ReconnectTest {
 
     @Test public void timeoutBeforeReadyReleasesCandidateForAnotherAttempt() throws Exception {
         waitForReconnect(); var stalled = client();
-        send(stalled, joinRequest(room.reconnect.code)); drain(stalled); drain(host);
+        send(stalled, joinRequest(GUEST_ID)); drain(stalled); drain(host);
         assertEquals(ATTACHING, room.reconnect.state);
         room.reconnect.deadline = 0;
         host.onTick(System.currentTimeMillis());
@@ -232,7 +294,7 @@ public class ReconnectTest {
 
     @Test public void hostCanCancelBeforeCandidateReady() throws Exception {
         waitForReconnect(); var pending = client();
-        send(pending, joinRequest(room.reconnect.code)); drain(pending); drain(host);
+        send(pending, joinRequest(GUEST_ID)); drain(pending); drain(host);
         send(host, ctl(CANCEL, 0)); assertRoomClosed(pending);
     }
 
@@ -367,7 +429,7 @@ public class ReconnectTest {
 
     @Test public void readyAndCoalescedQueryCannotAppendLobbyReplyAfterReconnectGo() throws Exception {
         waitForReconnect(); var next = client();
-        send(next, joinRequest(room.reconnect.code)); drain(next); drain(host);
+        send(next, joinRequest(GUEST_ID)); drain(next); drain(host);
         byte[] readyAndQuery = ByteBuffer.allocate(10).put((byte) 0x13)
                 .putInt(room.reconnect.epoch).putInt(room.reconnect.transfer).put((byte) 2).array();
         send(next, readyAndQuery);

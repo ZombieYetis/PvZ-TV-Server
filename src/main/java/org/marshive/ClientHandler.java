@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Objects;
 import java.util.Queue;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
@@ -74,6 +75,7 @@ public class ClientHandler {
     private int probeToken = 0;
     private int protocolVersion = NETPLAY_VERSION;
     private volatile String playerName = "";
+    private UUID playerId;
 
     private long lastActiveAtMillis = System.currentTimeMillis();
     private long p2pFallbackDeadlineAtMillis = 0L;
@@ -82,7 +84,6 @@ public class ClientHandler {
     private ClientHandler relayPeer;
     private boolean spectatorStreamRequested = false;
     private boolean spectatorRelayOpen = false;
-    private long reconnectTryAfter;
     private int badCommandCount = 0;
     private long controlWindowStartedNanos = System.nanoTime();
     private int controlCommandsInWindow;
@@ -462,7 +463,15 @@ public class ClientHandler {
         switch (type) {
             case RECONNECT_JOIN: {
                 if (readBuf.remaining() < 9) return false;
-                handleReconnectJoin(readBuf.getInt(), readBuf.getInt(), u8(readBuf.get()));
+                int roomId = readBuf.getInt();
+                int version = readBuf.getInt();
+                if (version < RelayReconnect.PLAYER_ID_VERSION) {
+                    readBuf.get(); // Consume the legacy one-byte credential before rejecting this version.
+                    handleReconnectJoin(roomId, version, null);
+                    return true;
+                }
+                if (readBuf.remaining() < 16) return false;
+                handleReconnectJoin(roomId, version, readPlayerId(version));
                 return true;
             }
             case RECONNECT_READY: {
@@ -477,8 +486,10 @@ public class ClientHandler {
                 byte[] nb = new byte[nameLen];
                 readBuf.get(nb);
                 int clientVersion = readBuf.getInt();
+                if (clientVersion >= RelayReconnect.PLAYER_ID_VERSION && readBuf.remaining() < 16) return false;
+                UUID identity = readPlayerId(clientVersion);
                 String roomName = PlayerNamePolicy.decode(nb);
-                handleCreate(roomName, clientVersion);
+                handleCreate(roomName, clientVersion, identity);
                 return true;
             }
             case QUERY: {
@@ -490,11 +501,13 @@ public class ClientHandler {
                 int roomId = readBuf.getInt();
                 int clientVersion = readBuf.getInt();
                 int nameLen = u8(readBuf.get());
-                if (readBuf.remaining() < nameLen) return false;
+                int identityBytes = clientVersion >= RelayReconnect.PLAYER_ID_VERSION ? 16 : 0;
+                if (readBuf.remaining() < nameLen + identityBytes) return false;
                 byte[] nb = new byte[nameLen];
                 readBuf.get(nb);
+                UUID identity = readPlayerId(clientVersion);
                 String guestName = PlayerNamePolicy.decode(nb);
-                handleJoin(roomId, clientVersion, guestName);
+                handleJoin(roomId, clientVersion, guestName, identity);
                 return true;
             }
             case START:
@@ -541,11 +554,13 @@ public class ClientHandler {
                 int roomId = readBuf.getInt();
                 int clientVersion = readBuf.getInt();
                 int nameLen = u8(readBuf.get());
-                if (readBuf.remaining() < nameLen) return false;
+                int identityBytes = clientVersion >= RelayReconnect.PLAYER_ID_VERSION ? 16 : 0;
+                if (readBuf.remaining() < nameLen + identityBytes) return false;
                 byte[] nb = new byte[nameLen];
                 readBuf.get(nb);
+                UUID identity = readPlayerId(clientVersion);
                 String watcherName = PlayerNamePolicy.decode(nb);
-                handleJoinSpectate(roomId, clientVersion, watcherName);
+                handleJoinSpectate(roomId, clientVersion, watcherName, identity);
                 return true;
             }
             case SWITCH_ROLE: {
@@ -568,6 +583,10 @@ public class ClientHandler {
         }
     }
 
+    private UUID readPlayerId(int version) {
+        return version >= RelayReconnect.PLAYER_ID_VERSION ? new UUID(readBuf.getLong(), readBuf.getLong()) : null;
+    }
+
     private boolean isCurrentRoomHost() {
         Room room = currentRoom;
         return room != null && room.getHost() == this;
@@ -582,16 +601,14 @@ public class ClientHandler {
         return isCurrentRoomHost() || isCurrentRoomGuest();
     }
 
-    private void handleReconnectJoin(int roomId, int version, int code) throws IOException {
+    private void handleReconnectJoin(int roomId, int version, UUID identity) throws IOException {
         Room room = rm.getRoom(roomId);
         int error = 0;
-        long now = System.currentTimeMillis();
         if (currentRoom != null) error = 2;
         else if (room == null) error = 1;
-        else if (version != room.getProtocolVersion() || version < RelayReconnect.VERSION) error = 5;
+        else if (version != room.getProtocolVersion() || version < RelayReconnect.PLAYER_ID_VERSION) error = 5;
         else if (room.reconnect.state != RelayReconnect.WAITING) error = 2;
-        else if (now < reconnectTryAfter || !room.reconnect.allowCodeAttempt(now)) error = 6;
-        else if (code > 99 || code != room.reconnect.code) { error = 3; reconnectTryAfter = now + 2000; }
+        else if (!identity.equals(room.reconnect.guestId)) error = 3;
         byte[] result = new byte[13];
         result[0] = (byte) error;
         if (error == 0) {
@@ -600,11 +617,12 @@ public class ClientHandler {
             currentRoom = room;
             protocolVersion = version;
             playerName = r.guestName;
+            playerId = identity;
             isHost = isSpectator = false;
             writeIntTo(result, 1, roomId);
             writeIntTo(result, 5, r.epoch);
             writeIntTo(result, 9, r.transfer);
-            reconnectState(room.getHost(), room, true);
+            reconnectState(room.getHost(), room);
         }
         sendFrame(RespType.RECONNECT_RESULT.code, result);
     }
@@ -627,12 +645,11 @@ public class ClientHandler {
         room.getHost().enqueueRaw(RelayReconnect.control(RelayReconnect.SYNC, r.state, epoch, transfer, 0));
     }
 
-    private static void reconnectState(ClientHandler target, Room room, boolean showCode) {
+    private static void reconnectState(ClientHandler target, Room room) {
         if (target == null || target.closed) return;
         RelayReconnect r = room.reconnect;
         try {
-            target.enqueueRaw(RelayReconnect.control(RelayReconnect.STATE, r.state, r.epoch, r.transfer,
-                    showCode && r.state == RelayReconnect.WAITING ? r.code : -1));
+            target.enqueueRaw(RelayReconnect.control(RelayReconnect.STATE, r.state, r.epoch, r.transfer, 0));
         } catch (IOException e) { target.close(); }
     }
 
@@ -652,7 +669,7 @@ public class ClientHandler {
         r.expected = r.received = 0;
         r.snapshotEnded = false;
         if (pending != null) { pending.currentRoom = null; pending.close(); }
-        reconnectState(room.getHost(), room, true);
+        reconnectState(room.getHost(), room);
     }
 
     private boolean handleReconnectEvent(Room room, byte[] event) throws IOException {
@@ -673,8 +690,8 @@ public class ClientHandler {
             } else if (op == RelayReconnect.FROZEN && room.getHost() == this && r.state == RelayReconnect.FREEZING) {
                 if (value != 1) { close("host scene cannot reconnect"); return true; }
                 r.state = RelayReconnect.WAITING;
-                reconnectState(this, room, true);
-                reconnectViewers(room, RelayReconnect.control(RelayReconnect.STATE, r.state, r.epoch, r.transfer, -1));
+                reconnectState(this, room);
+                reconnectViewers(room, RelayReconnect.control(RelayReconnect.STATE, r.state, r.epoch, r.transfer, 0));
             } else if (op == RelayReconnect.LOADED && r.candidate == this && r.state == RelayReconnect.SYNCING) {
                 if (value != 1) { failReconnect(room); return true; }
                 if (!r.snapshotEnded) return true;
@@ -696,7 +713,6 @@ public class ClientHandler {
                 next.relayPeer = this;
                 r.candidate = null;
                 r.state = RelayReconnect.NONE;
-                r.code = -1;
             }
             return true;
         }
@@ -729,7 +745,7 @@ public class ClientHandler {
         return true;
     }
 
-    private void handleCreate(String roomName, int clientVersion) throws IOException {
+    private void handleCreate(String roomName, int clientVersion, UUID identity) throws IOException {
         if (currentRoom != null) {
             sendError(ERR_BAD_REQ);
             return;
@@ -753,6 +769,7 @@ public class ClientHandler {
         currentRoom = rm.createRoom(roomName, this, clientVersion);
         protocolVersion = clientVersion;
         playerName = currentRoom.getName();
+        playerId = identity;
         isHost = true;
 
         byte[] payload = new byte[8];
@@ -765,7 +782,7 @@ public class ClientHandler {
         sendFrame(RespType.ROOM_LIST.code, buildRoomListPayload());
     }
 
-    private void handleJoin(int roomId, int clientVersion, String guestName) throws IOException {
+    private void handleJoin(int roomId, int clientVersion, String guestName, UUID identity) throws IOException {
         if (currentRoom != null) {
             sendError(ERR_BAD_REQ);
             return;
@@ -800,6 +817,7 @@ public class ClientHandler {
         isSpectator = false;
         protocolVersion = clientVersion;
         playerName = guestName;
+        playerId = identity;
 
         sendJoinResult(true, roomId, r.getProtocolVersion(), r.getName(), (byte) 0, buildRoomJoinFlags(r));
 
@@ -873,7 +891,7 @@ public class ClientHandler {
         broadcastSpectatorList(currentRoom);
     }
 
-    private void handleJoinSpectate(int roomId, int clientVersion, String watcherName) throws IOException {
+    private void handleJoinSpectate(int roomId, int clientVersion, String watcherName, UUID identity) throws IOException {
         if (currentRoom != null) {
             sendError(ERR_BAD_REQ);
             return;
@@ -903,6 +921,7 @@ public class ClientHandler {
         spectatorRelayOpen = false;
         protocolVersion = clientVersion;
         playerName = watcherName;
+        playerId = identity;
         r.addSpectator(this);
         sendJoinResult(true, roomId, r.getProtocolVersion(), r.getName(), (byte) 1, buildRoomJoinFlags(r));
         ClientHandler guest = r.getGuest();
@@ -1792,11 +1811,17 @@ public class ClientHandler {
             failReconnect(room);
         } else if (room.isGaming() && room.isRelayMode() && room.getProtocolVersion() >= RelayReconnect.VERSION
                 && room.getGuest() == this && room.reconnect.state == RelayReconnect.NONE) {
-            room.reconnect.guestName = playerName;
-            room.setGuest(null);
-            room.getHost().relayPeer = null;
-            room.reconnect.begin();
-            reconnectState(room.getHost(), room, true);
+            if (playerId == null) {
+                // Legacy clients still use relay heartbeats, but cannot authenticate a reconnect.
+                room.getHost().close("guest disconnected without a player identity");
+            } else {
+                room.reconnect.guestName = playerName;
+                room.reconnect.guestId = playerId;
+                room.setGuest(null);
+                room.getHost().relayPeer = null;
+                room.reconnect.begin();
+                reconnectState(room.getHost(), room);
+            }
         } else if (!room.isGaming() && room.getGuest() == this) {
             room.setGuest(null);
             logGuestFlow("LEFT_DISCONNECT", room, this);

@@ -126,6 +126,6 @@ java -jar PvZ-TV-Server.jar --base=26667 --replicate_to=IP:PORT
 
 ## 卡牌名称
 
-卡牌 ID 和名称以游戏源码的 `ConstEnums.h`、`Plant.cpp`、`Zombie.cpp` 为准，中文名称对应 `LawnStrings.txt` 和 `AddonStrings.txt`。已补齐选卡范围内的僵尸 ID `102–105`（交通协管、科学家、掘墓、骷髅僵尸）和植物 ID `209–210`（榴莲、红针花）。不加入超出选卡枚举范围的隐藏卡牌：僵尸以 `EXTENDED_NUM_ZOMBIE_SEEDS_IN_CHOOSER` 为上界，新增植物以 `EXTENDED_NUM_SEEDS_IN_CHOOSER` 为上界，均不包含上界值。
+卡牌 ID 和名称以游戏源码的 `ConstEnums.h`、`Plant.cpp`、`Zombie.cpp` 为准，中文名称对应 `LawnStrings.txt` 和 `AddonStrings.txt`。已同步到当前选卡范围：僵尸包含 ID `106`（喂鸽僵尸），新增植物包含 ID `211`（闪电芦苇）。名称映射、卡图和网页图鉴随服务端一起打包。不加入超出选卡枚举范围的隐藏卡牌：僵尸以 `EXTENDED_NUM_ZOMBIE_SEEDS_IN_CHOOSER` 为上界，新增植物以 `EXTENDED_NUM_SEEDS_IN_CHOOSER` 为上界，均不包含上界值。
 
 服务端只维护卡牌 ID 到英文键名的映射，中文名称继续通过原有机制从 `LawnStrings.txt` 和 `AddonStrings.txt` 中读取，缺少对应条目时显示英文键名。网页按卡牌 ID 解析名称，已有对战记录无需清空或重建。

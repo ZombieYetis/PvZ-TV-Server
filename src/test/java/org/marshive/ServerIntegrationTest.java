@@ -292,22 +292,25 @@ public class ServerIntegrationTest {
         assertTrue(names.contains("\"seed_type\":209,\"en\":\"ENDURIAN\",\"zh\":\"榴莲\""));
         assertTrue(names.contains("\"seed_type\":102,\"en\":\"CROSSING_GUARD_ZOMBIE\",\"zh\":\"交通协管僵尸\""));
         assertTrue(names.contains("\"seed_type\":106,\"en\":\"PIGEON_FEEDER_ZOMBIE\",\"zh\":\"喂鸽僵尸\""));
-        for (int excluded : new int[]{107, 108, 109, 110, 111, 112, 211, 212}) {
+        assertTrue(names.contains("\"seed_type\":211,\"en\":\"LIGHTNING_REED\",\"zh\":\"闪电芦苇\""));
+        for (int excluded : new int[]{107, 108, 109, 110, 111, 112, 212, 213, 214}) {
             assertFalse(names.contains("\"seed_type\":" + excluded + ","));
         }
 
         // Use deliberately reversed side labels to verify classification by the game's card IDs.
-        String events = "0,Z,K,209;1,Z,K,210;2,Z,K,1;3,Z,K,2;4,Z,K,0;"
-                + "5,P,K,102;6,P,K,103;7,P,K,104;8,P,K,62;9,P,K,64";
+        String events = "0,Z,K,209;1,Z,K,210;2,Z,K,1;3,Z,K,211;4,Z,K,0;"
+                + "5,P,K,102;6,P,K,103;7,P,K,104;8,P,K,62;9,P,K,106";
         String meta = "bg=0&addon_ep=0&addon_bp=1&addon_ban=0&plant_use=209:3,210:2&zombie_use=102:3,103:2";
         assertEquals("OK", metrics(base, "SETTLE|extended-cards|2|PLANT_WIN|100|" + events + "|" + meta + "\n"));
         String filters = "&extra_packet=false&ban_mode=false&mode=DAY";
         String plants = httpGet(base + 4000, "/api/card-stats?side=PLANT" + filters);
         String zombies = httpGet(base + 4000, "/api/card-stats?side=ZOMBIE" + filters);
         assertTrue(plants.contains("\"seed_en\":\"RED_STINGER\""));
+        assertTrue(plants.contains("\"seed_en\":\"LIGHTNING_REED\""));
         assertFalse(plants.contains("\"seed_type\":102,"));
         assertTrue(zombies.contains("\"seed_en\":\"SCIENTIST_ZOMBIE\""));
         assertTrue(zombies.contains("\"seed_en\":\"GRAVEDIGGER_ZOMBIE\""));
+        assertTrue(zombies.contains("\"seed_en\":\"PIGEON_FEEDER_ZOMBIE\""));
         assertFalse(zombies.contains("\"seed_type\":209,"));
         String decks = httpGet(base + 4000, "/api/top-decks?side=PLANT" + filters);
         assertTrue(decks.contains("\"core_en\":\"ENDURIANRED_STINGER\""));
@@ -396,12 +399,13 @@ public class ServerIntegrationTest {
         assertTrue(httpGet(base + 4000, "/site/ui/data-scene.webp").length() > 0);
         assertTrue(httpGet(base + 4000, "/assets/site/ui/data-scene.webp").length() > 0);
         assertHttpStatus(base + 4000, "/assets/cards/SEED_PACKET_00.PNG", 200);
+        assertHttpStatus(base + 4000, "/assets/cards/SEED_PACKET_106.PNG", 200);
+        assertHttpStatus(base + 4000, "/assets/cards/SEED_PACKET_211.PNG", 200);
         assertHttpStatus(base + 4000, "/assets/cards/SEED_PACKET_91_MOUND_LEVEL_0.PNG", 200);
         assertHttpStatus(base + 4000, "/assets/cards/%2e%2e%2fsite%2fdata.js", 404);
         String almanac = httpGet(base + 4000, "/almanac/");
         assertTrue(almanac.contains("<title>植物图鉴 · PvZ TV</title>"));
-        assertTrue(almanac.contains("V3215"));
-        assertTrue(almanac.contains("window.PVZ_IMAGE_DATA"));
+        assertTrue(almanac.contains("V3227"));
         assertTrue(almanac.contains("hostname.endsWith(\"github.io\")"));
         Files.writeString(directory.resolve("dashboard.html"), dashboard);
     }
@@ -514,12 +518,13 @@ public class ServerIntegrationTest {
     }
 
     private void reconnectRoundTrip(int base) throws Exception {
+        byte[] identity = ByteBuffer.allocate(16).putLong(0xba1a2c90c0774a84L).putLong(0x88096e23c5834265L).array();
         try (Socket host = connect(base); Socket guest = connect(base); Socket rejoined = connect(base)) {
-            host.getOutputStream().write(ByteBuffer.allocate(7).put((byte) 1).put((byte) 1)
-                    .put((byte) 'H').putInt(RelayReconnect.VERSION).array());
+            host.getOutputStream().write(ByteBuffer.allocate(23).put((byte) 1).put((byte) 1)
+                    .put((byte) 'H').putInt(RelayReconnect.PLAYER_ID_VERSION).put(new byte[16]).array());
             int room = ByteBuffer.wrap(frame(host, 0x81)).getInt();
-            guest.getOutputStream().write(ByteBuffer.allocate(11).put((byte) 3).putInt(room)
-                    .putInt(RelayReconnect.VERSION).put((byte) 1).put((byte) 'G').array());
+            guest.getOutputStream().write(ByteBuffer.allocate(27).put((byte) 3).putInt(room)
+                    .putInt(RelayReconnect.PLAYER_ID_VERSION).put((byte) 1).put((byte) 'G').put(identity).array());
             assertEquals(1, frame(guest, 0x83)[0]);
             host.getOutputStream().write(5);
             byte[] relayEpoch = frame(host, 0x85); frame(guest, 0x85);
@@ -533,9 +538,8 @@ public class ServerIntegrationTest {
             host.getOutputStream().write(RelayReconnect.control(RelayReconnect.FROZEN, 0, epoch, transfer, 1));
             byte[] waiting = rawEvent(host);
             assertEquals(RelayReconnect.WAITING, waiting[3]);
-            int code = RelayReconnect.intAt(waiting, 12);
-            rejoined.getOutputStream().write(ByteBuffer.allocate(10).put((byte) 0x12).putInt(room)
-                    .putInt(RelayReconnect.VERSION).put((byte) code).array());
+            rejoined.getOutputStream().write(ByteBuffer.allocate(25).put((byte) 0x12).putInt(room)
+                    .putInt(RelayReconnect.PLAYER_ID_VERSION).put(identity).array());
             byte[] paired = frame(rejoined, 0x91); assertEquals(0, paired[0]);
             transfer = RelayReconnect.intAt(paired, 9);
             assertEquals(RelayReconnect.ATTACHING, rawEvent(host)[3]);

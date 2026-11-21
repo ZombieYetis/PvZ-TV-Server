@@ -136,6 +136,7 @@ final class SeedTypeNames {
         put(208, "PEANUT");
         put(209, "ENDURIAN");
         put(210, "RED_STINGER");
+        put(211, "LIGHTNING_REED");
         // Stop before EXTENDED_NUM_SEEDS_IN_CHOOSER; hidden plants are excluded.
 
         loadLocalizedResource("/LawnStrings.txt");

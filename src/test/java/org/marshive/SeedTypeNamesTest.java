@@ -27,6 +27,11 @@ public class SeedTypeNamesTest {
         assertEquals("豌豆射手", SeedTypeNames.zhNameOf(0));
         assertEquals("交通协管僵尸", SeedTypeNames.zhNameOf(102));
         assertEquals("红针花", SeedTypeNames.zhNameOf(210));
+        assertEquals("LIGHTNING_REED", SeedTypeNames.nameOf(211));
+        assertEquals("闪电芦苇", SeedTypeNames.zhNameOf(211));
+        assertTrue(SeedTypeNames.isPlantSeed(211));
+        assertEquals("UnknownSeed", SeedTypeNames.nameOf(212));
+        assertEquals("UnknownSeed", SeedTypeNames.nameOf(107));
         assertEquals("PIGEON_FEEDER_ZOMBIE", SeedTypeNames.nameOf(106));
         assertEquals("喂鸽僵尸", SeedTypeNames.zhNameOf(106));
         assertTrue(SeedTypeNames.isZombieSeed(106));
