@@ -19,15 +19,15 @@ public class SensitiveWordFilterTest {
     }
 
     @Test public void masksChineseFullWidthCaseAndOverlappingTerms() throws Exception {
-        SensitiveWordFilter filter = new SensitiveWordFilter(List.of("test", "坏词", "abc", "bcde"));
+        SensitiveWordFilter filter = new SensitiveWordFilter(List.of("test", "坏词", "甲乙丙", "乙丙丁戊"));
         assertEquals("[VS] **房 ****", mask(filter, "[VS] 坏词房 ＴｅＳＴ"));
-        assertEquals("*****", mask(filter, "abcde"));
+        assertEquals("*****", mask(filter, "甲乙丙丁戊"));
         assertEquals("****-****", mask(filter, "test-TEST"));
         assertEquals("[COOP] 阳光😀 123", mask(filter, "[COOP] 阳光😀 123"));
     }
 
     @Test public void normalizationMasksWholeTextElementsWithoutDamagingOtherEmoji() throws Exception {
-        SensitiveWordFilter filter = new SensitiveWordFilter(List.of("é", "ss", "σ", "ff", "👩🏽‍💻"));
+        SensitiveWordFilter filter = new SensitiveWordFilter(List.of("é", "ss", "σ", "ffi", "👩🏽‍💻"));
         assertEquals("*房", mask(filter, "e\u0301房"));
         assertEquals("*房", mask(filter, "ß房"));
         assertEquals("***", mask(filter, "Σσς"));
@@ -58,6 +58,7 @@ public class SensitiveWordFilterTest {
         SensitiveWordFilter filter = SensitiveWordFilter.fromDirectory(directory);
         assertEquals(3, filter.wordCount());
         assertEquals("** **** *** 普通", mask(filter, "坏词 test 第二词 普通"));
+        assertEquals("contest", mask(filter, "contest"));
     }
 
     @Test public void rejectsMissingEmptyAndMalformedDictionaries() throws Exception {
@@ -89,6 +90,34 @@ public class SensitiveWordFilterTest {
     @Test public void manyOverlappingMatchesAndMaximumProtocolLengthStayBounded() throws Exception {
         SensitiveWordFilter filter = new SensitiveWordFilter(IntStream.rangeClosed(1, 128)
                 .mapToObj(i -> "a".repeat(i)).toList());
-        assertEquals("*".repeat(255), mask(filter, "a".repeat(255)));
+        assertEquals("a".repeat(255), mask(filter, "a".repeat(255)));
+        assertEquals("*".repeat(128), mask(filter, "a".repeat(128)));
+        assertEquals("* ".repeat(127) + "*", mask(filter, "a ".repeat(127) + "a"));
+    }
+
+    @Test public void englishWordsDoNotMaskPartsOfNormalNames() {
+        SensitiveWordFilter filter = SensitiveWordFilter.bundled();
+        for (String name : new String[]{"parsee", "Parsee", "Ｐａｒｓｅｅ", "class", "Cassie", "Scunthorpe"}) {
+            assertEquals(name, mask(filter, name));
+        }
+        assertEquals("**** ***", mask(filter, "ARSE ass"));
+        assertEquals("***_****-****123", mask(filter, "ass_arse-DICK123"));
+        assertEquals("玩家****", mask(filter, "玩家arse"));
+        assertEquals("********", mask(filter, "arsehole"));
+    }
+
+    @Test public void boundariesUseCompleteNormalizedInputBeforeTruncation() throws Exception {
+        SensitiveWordFilter filter = new SensitiveWordFilter(List.of("arse", "ass", "坏词"));
+        assertEquals("parse", filter.mask("parsee", 5));
+        assertEquals("ar", filter.mask("arsenal", 2));
+        assertEquals("**", filter.mask("arse!", 2));
+        assertEquals("éarse arseé", mask(filter, "éarse arseé"));
+        assertEquals("e\u0301arse arse\u0301", mask(filter, "e\u0301arse arse\u0301"));
+        assertEquals("****", mask(filter, "a\u200Drse"));
+        assertEquals("你好**呀", mask(filter, "你好坏词呀"));
+        PlayerNamePolicy policy = new PlayerNamePolicy(filter);
+        assertEquals("[VS]parsee", policy.roomName("[VS]parsee"));
+        assertEquals("parsee", policy.playerName("parsee"));
+        assertEquals("[VS]****", policy.roomName("[VS]ARSE"));
     }
 }

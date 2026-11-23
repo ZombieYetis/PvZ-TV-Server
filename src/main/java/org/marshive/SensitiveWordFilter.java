@@ -60,6 +60,7 @@ final class SensitiveWordFilter {
                 node = child;
             }
             node.terminal = true;
+            node.wholeLatinWord = normalized.codePoints().allMatch(SensitiveWordFilter::isLatinWordPart);
         }
         if (normalizedWords.isEmpty()) throw new IOException("Sensitive-word list is empty");
         maximumWordLength = longest;
@@ -162,7 +163,9 @@ final class SensitiveWordFilter {
             for (int end = start; end < Math.min(normalized.length, start + maximumWordLength); end++) {
                 node = node.children.get(normalized[end]);
                 if (node == null) break;
-                if (node.terminal) {
+                if (node.terminal && (!node.wholeLatinWord
+                        || ((start == 0 || !isLatinWordPart(normalized[start - 1]))
+                        && (end + 1 == normalized.length || !isLatinWordPart(normalized[end + 1]))))) {
                     coverage[sources[start]]++;
                     coverage[sources[end] + 1]--;
                     changed = true;
@@ -184,8 +187,16 @@ final class SensitiveWordFilter {
                 .replace("\u200D", "").replace("\uFE0E", "").replace("\uFE0F", "").replace("ß", "ss").replace('ς', 'σ');
     }
 
+    private static boolean isLatinWordPart(int point) {
+        int type = Character.getType(point);
+        return Character.isLetter(point) && Character.UnicodeScript.of(point) == Character.UnicodeScript.LATIN
+                || type == Character.NON_SPACING_MARK || type == Character.COMBINING_SPACING_MARK
+                || type == Character.ENCLOSING_MARK;
+    }
+
     private static final class Node {
         final Map<Integer, Node> children = new HashMap<>();
         boolean terminal;
+        boolean wholeLatinWord;
     }
 }
