@@ -37,13 +37,30 @@ public class RoomManager {
         return names.playerName(raw);
     }
 
+    record CreateResult(Room room, String rejection) {}
+
+    CreateResult tryCreateRoom(String name, ClientHandler host, int version) {
+        synchronized (AbuseGuard.class) {
+            String cleaned = names.roomName(name);
+            String rejection = rooms.size() >= MAX_ROOMS_PER_SHARD ? "ROOMS_SHARD"
+                    : AbuseGuard.createRejection(host.getRemoteIp(), cleaned, System.currentTimeMillis());
+            if (rejection != null) return new CreateResult(null, rejection);
+            return new CreateResult(createCleanedRoom(cleaned, host, version), null);
+        }
+    }
+
     public Room createRoom(String name, ClientHandler host, int protocolVersion) {
-        name = names.roomName(name);
+        return createCleanedRoom(names.roomName(name), host, protocolVersion);
+    }
+
+    private Room createCleanedRoom(String name, ClientHandler host, int protocolVersion) {
         int id = idGen.incrementAndGet();
         Room r = new Room(id, name, host, protocolVersion);
         rooms.put(id, r);
+        AbuseGuard.registerRoom(r);
         String createdAt = TS_FMT.format(Instant.ofEpochMilli(r.getCreatedAtMillis()));
-        System.out.println("[shard=" + shardId + "] Room Created: " + id + " [" + name + "] createdAt=" + createdAt);
+        System.out.println("[shard=" + shardId + "] Room Created: " + id + " [" + name + "] createdAt=" + createdAt
+                + " ip=" + (host == null ? "unknown" : host.getRemoteIp()) + " version=" + protocolVersion);
         return r;
     }
 
@@ -71,7 +88,12 @@ public class RoomManager {
 
     public void removeRoom(int id) {
         Room r = rooms.remove(id);
-        if (r != null) System.out.println("[shard=" + shardId + "] Room Removed: " + id);
+        if (r != null) {
+            AbuseGuard.releaseRoom(r);
+            System.out.println("[shard=" + shardId + "] Room Removed: " + id
+                    + " ip=" + (r.getHost() == null ? "unknown" : r.getHost().getRemoteIp())
+                    + " removedAt=" + TS_FMT.format(Instant.now()));
+        }
     }
 
     public Iterable<Room> allRooms() {
@@ -83,14 +105,10 @@ public class RoomManager {
     }
 
     public int hostedRoomCountByIp(String ip) {
+        String target = ip == null || ip.isBlank() ? "unknown" : ip;
         int count = 0;
-        String targetIp = (ip == null || ip.isBlank()) ? "unknown" : ip;
-        for (Room r : rooms.values()) {
-            if (r == null) continue;
-            ClientHandler host = r.getHost();
-            if (host != null && targetIp.equals(host.getRemoteIp())) {
-                count++;
-            }
+        for (Room room : rooms.values()) {
+            if (room.getHost() != null && target.equals(room.getHost().getRemoteIp())) count++;
         }
         return count;
     }

@@ -43,6 +43,11 @@ public class SensitiveWordFilterTest {
         assertEquals("对战**站", mask(filter, "对战资源站"));
         assertEquals("[VS] **房间", mask(filter, "[VS] Ｑｑ房间"));
         assertEquals("***房", mask(filter, "制作组房"));
+        assertEquals("**", mask(filter, "沙比"));
+        assertEquals("小**房", mask(filter, "小沙比房"));
+        for (String word : List.of("傻逼", "煞笔", "傻比", "啥比", "傻笔", "啥币")) {
+            assertEquals("小**房", mask(filter, "小" + word + "房"));
+        }
         assertEquals("[VS]****", mask(filter, "[VS]ＤｉＣｋ"));
         assertEquals("**** **** ***** ***", mask(filter, "ShIt FUCK PuSsY ass"));
         assertEquals("***** ******", mask(filter, "NiGgA NIGGER"));

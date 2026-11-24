@@ -46,7 +46,6 @@ public class ClientHandler {
     private static final int MAX_PENDING_WRITE_BUFFERS = 4096;
     private static final BufferBudget WRITE_BUDGET = new BufferBudget(
             ResourceLimits.MAX_QUEUED_BYTES, ResourceLimits.MAX_QUEUED_BUFFERS);
-    private static final int MAX_ACTIVE_ROOMS_PER_IP = 4;
     private static final int MIN_PLAUSIBLE_NETPLAY_VERSION = 3000;
     private static final int MAX_PLAUSIBLE_NETPLAY_VERSION = 5000;
 
@@ -747,26 +746,24 @@ public class ClientHandler {
 
     private void handleCreate(String roomName, int clientVersion, UUID identity) throws IOException {
         if (currentRoom != null) {
+            AbuseGuard.logRejection(remoteIp, shardId, "CREATE_ALREADY_IN_ROOM", System.currentTimeMillis());
             sendError(ERR_BAD_REQ);
             return;
         }
         if (clientVersion < MIN_PLAUSIBLE_NETPLAY_VERSION || clientVersion > MAX_PLAUSIBLE_NETPLAY_VERSION) {
+            AbuseGuard.logRejection(remoteIp, shardId, "CREATE_INVALID_VERSION", System.currentTimeMillis());
             sendError(ERR_BAD_REQ);
             return;
         }
-        if (rm.roomCount() >= RoomManager.MAX_ROOMS_PER_SHARD) {
-            sendError(ERR_FULL);
+        RoomManager.CreateResult result = rm.tryCreateRoom(roomName, this, clientVersion);
+        if (result.rejection() != null) {
+            AbuseGuard.logRejection(remoteIp, shardId, result.rejection(), System.currentTimeMillis());
+            sendError(result.rejection().equals("ROOMS_SHARD")
+                    || result.rejection().equals("ACTIVE_ROOMS_IP")
+                    || result.rejection().equals("WAITING_ROOMS_NAME") ? ERR_FULL : ERR_NOT_ALLOWED);
             return;
         }
-        if (rm.hostedRoomCountByIp(remoteIp) >= MAX_ACTIVE_ROOMS_PER_IP) {
-            sendError(ERR_FULL);
-            return;
-        }
-        if (!AbuseGuard.allowCreate(remoteIp, System.currentTimeMillis())) {
-            sendError(ERR_NOT_ALLOWED);
-            return;
-        }
-        currentRoom = rm.createRoom(roomName, this, clientVersion);
+        currentRoom = result.room();
         protocolVersion = clientVersion;
         playerName = currentRoom.getName();
         playerId = identity;

@@ -224,6 +224,47 @@ public class ServerIntegrationTest {
         }
     }
 
+    @Test public void createFloodIsLoggedButGuestsCanStillJoinAndPlay() throws Exception {
+        int base = availableBase();
+        Path directory = Files.createTempDirectory(Path.of("target"), "server-create-limit-").toAbsolutePath();
+        Process process = startServer(base, directory);
+        try {
+            awaitReady(base, process);
+            try (Socket host = connect(base); Socket second = connect(base);
+                 Socket third = connect(base); Socket limited = connect(base)) {
+                host.getOutputStream().write(createRoomCommand("first".getBytes(StandardCharsets.UTF_8)));
+                int roomId = ByteBuffer.wrap(frame(host, 0x81)).getInt();
+                second.getOutputStream().write(createRoomCommand("second".getBytes(StandardCharsets.UTF_8)));
+                frame(second, 0x81);
+                third.getOutputStream().write(createRoomCommand("third".getBytes(StandardCharsets.UTF_8)));
+                frame(third, 0x81);
+                limited.getOutputStream().write(createRoomCommand("fourth".getBytes(StandardCharsets.UTF_8)));
+                frame(limited, 0xFF);
+                limited.getOutputStream().write(joinRoomCommand(3, roomId, "guest".getBytes(StandardCharsets.UTF_8)));
+                assertEquals(1, frame(limited, 0x83)[0]);
+                frame(host, 0x84);
+                host.getOutputStream().write(5);
+                byte[] epoch = frame(host, 0x85);
+                assertArrayEquals(epoch, frame(limited, 0x85));
+                byte[] ready = ByteBuffer.allocate(5).put((byte) 0x0B).put(epoch).array();
+                host.getOutputStream().write(ready);
+                limited.getOutputStream().write(ready);
+                frame(host, 0x8B);
+                frame(limited, 0x8B);
+                byte[] action = {27, 5, 1, 0, 0};
+                limited.getOutputStream().write(action);
+                assertArrayEquals(action, rawEvent(host));
+            }
+            String log = Files.readString(directory.resolve("server.log"));
+            assertTrue(log, log.contains("ip=127.0.0.1 version=3215"));
+            assertTrue(log, log.contains("[ABUSE_REJECT] time="));
+            assertTrue(log, log.contains("ip=127.0.0.1 shard=0 reason=CREATES_10S"));
+        } finally {
+            process.destroyForcibly();
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+        }
+    }
+
     private static byte[] withInvalidByte(String name) {
         byte[] text = name.getBytes(StandardCharsets.UTF_8);
         return ByteBuffer.allocate(text.length + 1).put((byte) 0xff).put(text).array();

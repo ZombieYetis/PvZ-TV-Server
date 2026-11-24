@@ -31,7 +31,7 @@ final class SensitiveWordFilter {
     private static final int MAX_NODES = 200000;
     private static final Pattern TEXT_ELEMENT = Pattern.compile("\\X");
     private static final List<String> BUNDLED_FILES = List.of(
-            "广告.txt", "色情类.txt", "涉枪涉爆违法信息关键词.txt", "政治类.txt", "作者类.txt", "英文.txt");
+            "广告.txt", "色情类.txt", "涉枪涉爆违法信息关键词.txt", "政治类.txt", "作者类.txt");
 
     private final Node root = new Node();
     private final int maximumWordLength;
