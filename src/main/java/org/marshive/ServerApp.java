@@ -207,10 +207,7 @@ public class ServerApp {
 
             // Run on the same selector thread as joins/start/reconnect, avoiding eviction races.
             if (now - lastSpamCleanAt >= 1000L) {
-                for (Room room : AbuseGuard.spamRooms(now)) {
-                    int shard = (room.getId() >>> 24) & 0x7F;
-                    if (shard < rms.length) rms[shard].removeSpamRoom(room);
-                }
+                cleanSpamRooms(rms, now);
                 lastSpamCleanAt = now;
             }
 
@@ -227,6 +224,19 @@ public class ServerApp {
             }
             ServerHealth.loopCompleted();
         }
+    }
+
+    static int cleanSpamRooms(RoomManager[] managers, long nowMillis) {
+        long cleanupStarted = System.nanoTime();
+        int processed = 0;
+        for (Room room : AbuseGuard.spamRooms(nowMillis)) {
+            // Soft budget: complete this room, then yield. Reselect next second to protect new joins.
+            if (processed > 0 && System.nanoTime() - cleanupStarted >= 2_000_000L) break;
+            int shard = (room.getId() >>> 24) & 0x7F;
+            if (shard < managers.length) managers[shard].removeSpamRoom(room);
+            processed++;
+        }
+        return processed;
     }
 
     private static void startProbeThread(int probePort, int probeIndex) {

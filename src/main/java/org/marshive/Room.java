@@ -68,7 +68,10 @@ public class Room {
     }
 
     public void setGaming(boolean v) {
-        this.gaming = v;
+        synchronized (AbuseGuard.class) {
+            this.gaming = v;
+            AbuseGuard.roomGamingChanged(this);
+        }
     }
 
     public boolean isFull() {

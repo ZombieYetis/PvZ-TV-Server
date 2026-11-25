@@ -41,6 +41,12 @@ public class SensitiveWordFilterTest {
         SensitiveWordFilter filter = SensitiveWordFilter.bundled();
         assertTrue(filter.wordCount() > 100);
         assertEquals("对战**站", mask(filter, "对战资源站"));
+        assertEquals("***", mask(filter, "b站找"));
+        for (String word : List.of("b站搜", "B站搜", "b站查", "B站查")) {
+            assertEquals("***", mask(filter, word));
+        }
+        assertEquals("************", mask(filter, "BV1b9yfzjEfD"));
+        assertEquals("***************", mask(filter, "B站找bv1b9yfzjefd"));
         assertEquals("[VS] **房间", mask(filter, "[VS] Ｑｑ房间"));
         assertEquals("***房", mask(filter, "制作组房"));
         assertEquals("**", mask(filter, "沙比"));
@@ -109,6 +115,18 @@ public class SensitiveWordFilterTest {
         assertEquals("***_****-****123", mask(filter, "ass_arse-DICK123"));
         assertEquals("玩家****", mask(filter, "玩家arse"));
         assertEquals("********", mask(filter, "arsehole"));
+    }
+
+    @Test public void sexualTermsTreatCaoVariantsEquallyWithoutBlockingOrdinaryWords() {
+        SensitiveWordFilter filter = SensitiveWordFilter.bundled();
+        for (String word : List.of("爆操", "被操", "操逼", "操黑", "操烂", "操死", "操s", "操S", "操我", "狂操", "轮操", "操你")) {
+            for (char variant : new char[]{'草', '艹', '操', '肏'}) {
+                assertEquals(word, "**", mask(filter, word.replace('操', variant)));
+            }
+        }
+        for (String name : List.of("草坪", "小草", "操作", "曹操", "艹")) {
+            assertEquals(name, name, mask(filter, name));
+        }
     }
 
     @Test public void boundariesUseCompleteNormalizedInputBeforeTruncation() throws Exception {
