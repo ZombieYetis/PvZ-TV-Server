@@ -135,6 +135,7 @@ public class ServerApp {
         }
 
         long lastRoomCleanAt = System.currentTimeMillis();
+        long lastSpamCleanAt = 0;
         ServerHealth.startWatchdog();
         System.out.println("[LIMITS] connections=" + ResourceLimits.MAX_CONNECTIONS
                 + " trackedIps=" + ResourceLimits.MAX_TRACKED_IPS
@@ -203,6 +204,15 @@ public class ServerApp {
                 }
             }
             SettlementReplicator.onTick(now);
+
+            // Run on the same selector thread as joins/start/reconnect, avoiding eviction races.
+            if (now - lastSpamCleanAt >= 1000L) {
+                for (Room room : AbuseGuard.spamRooms(now)) {
+                    int shard = (room.getId() >>> 24) & 0x7F;
+                    if (shard < rms.length) rms[shard].removeSpamRoom(room);
+                }
+                lastSpamCleanAt = now;
+            }
 
             if (now - lastRoomCleanAt >= ROOM_CLEAN_INTERVAL_MS) {
                 int removedTotal = 0;

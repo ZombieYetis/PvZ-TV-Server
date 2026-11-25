@@ -757,7 +757,7 @@ public class ClientHandler {
         }
         RoomManager.CreateResult result = rm.tryCreateRoom(roomName, this, clientVersion);
         if (result.rejection() != null) {
-            AbuseGuard.logRejection(remoteIp, shardId, result.rejection(), System.currentTimeMillis());
+            AbuseGuard.logRejection(remoteIp, shardId, result.rejection(), System.currentTimeMillis(), result.name());
             sendError(result.rejection().equals("ROOMS_SHARD")
                     || result.rejection().equals("ACTIVE_ROOMS_IP")
                     || result.rejection().equals("WAITING_ROOMS_NAME") ? ERR_FULL : ERR_NOT_ALLOWED);

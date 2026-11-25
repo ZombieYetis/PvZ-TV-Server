@@ -37,15 +37,15 @@ public class RoomManager {
         return names.playerName(raw);
     }
 
-    record CreateResult(Room room, String rejection) {}
+    record CreateResult(Room room, String rejection, String name) {}
 
     CreateResult tryCreateRoom(String name, ClientHandler host, int version) {
         synchronized (AbuseGuard.class) {
             String cleaned = names.roomName(name);
             String rejection = rooms.size() >= MAX_ROOMS_PER_SHARD ? "ROOMS_SHARD"
                     : AbuseGuard.createRejection(host.getRemoteIp(), cleaned, System.currentTimeMillis());
-            if (rejection != null) return new CreateResult(null, rejection);
-            return new CreateResult(createCleanedRoom(cleaned, host, version), null);
+            if (rejection != null) return new CreateResult(null, rejection, cleaned);
+            return new CreateResult(createCleanedRoom(cleaned, host, version), null, cleaned);
         }
     }
 
@@ -102,6 +102,15 @@ public class RoomManager {
 
     public int roomCount() {
         return rooms.size();
+    }
+
+    void removeSpamRoom(Room room) {
+        if (rooms.get(room.getId()) != room || !AbuseGuard.emptyWaitingRoom(room)) return;
+        room.getHost().onRoomRemovedByServer();
+        removeRoom(room.getId());
+        AnalyticsCollector.onRoomClosed(room.getId());
+        System.out.println("[ROOM_SPAM_CLEAN] room=" + room.getId() + " ip=" + room.getHost().getRemoteIp()
+                + " name=[" + room.getName() + "] time=" + Instant.now());
     }
 
     public int hostedRoomCountByIp(String ip) {

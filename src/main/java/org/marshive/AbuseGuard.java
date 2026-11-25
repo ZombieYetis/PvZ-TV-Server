@@ -7,6 +7,10 @@ import java.util.Map;
 import java.text.Normalizer;
 import java.util.Locale;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 
 final class AbuseGuard {
     private static final int MAX_CONNECTIONS_PER_IP = 24;
@@ -24,6 +28,9 @@ final class AbuseGuard {
     private static long logWindowStarted;
     private static int rejectionLogs;
     private static long suppressedLogs;
+    private static final long NAME_WINDOW_MS = 30000L;
+    private static final long NAME_BLOCK_MS = 120000L;
+    private static final Map<String, NameState> NAME_STATES = new HashMap<>();
 
     private AbuseGuard() {}
 
@@ -66,16 +73,69 @@ final class AbuseGuard {
             if (!room.isGaming() && targetName.equals(entry.getValue())) sameName++;
         }
         if (active >= MAX_ACTIVE_ROOMS_PER_IP) return "ACTIVE_ROOMS_IP";
+        NameState nameState = NAME_STATES.get(targetName);
+        if (nameState != null) {
+            if (nowMillis < nameState.blockedUntil) return "NAME_COOLDOWN";
+            nameState.creates.removeIf(c -> c.time < nowMillis - NAME_WINDOW_MS);
+            Set<String> sources = new HashSet<>();
+            sources.add(normalizeIp(ip));
+            for (NameCreate create : nameState.creates) sources.add(create.ip);
+            if (nameState.creates.size() >= 4 && sources.size() >= 3) {
+                nameState.blockedUntil = nowMillis + NAME_BLOCK_MS;
+                return "NAME_BURST";
+            }
+        } else if (NAME_STATES.size() >= 8192) {
+            cleanupNames(nowMillis);
+            if (NAME_STATES.size() >= 8192) return "NAME_TABLE_FULL";
+        }
         if (sameName >= MAX_WAITING_ROOMS_PER_NAME) return "WAITING_ROOMS_NAME";
         return createRateRejection(ip, nowMillis);
     }
 
     static synchronized void registerRoom(Room room) {
-        if (room.getHost() != null) ROOM_NAMES.put(room, roomNameKey(room.getName()));
+        if (room.getHost() == null) return;
+        String name = roomNameKey(room.getName());
+        ROOM_NAMES.put(room, name);
+        NameState state = NAME_STATES.computeIfAbsent(name, key -> new NameState());
+        long now = room.getCreatedAtMillis();
+        state.creates.removeIf(c -> c.time < now - NAME_WINDOW_MS);
+        state.creates.addLast(new NameCreate(now, room.getHost().getRemoteIp()));
     }
 
     static synchronized void releaseRoom(Room room) {
         ROOM_NAMES.remove(room);
+    }
+
+    static boolean emptyWaitingRoom(Room room) {
+        return !room.isGaming() && room.getGuest() == null && room.spectatorCount() == 0
+                && room.reconnect.state == RelayReconnect.NONE;
+    }
+
+    static synchronized List<Room> spamRooms(long nowMillis) {
+        Map<String, Room> oldest = new HashMap<>();
+        for (Map.Entry<Room, String> entry : ROOM_NAMES.entrySet()) {
+            NameState state = NAME_STATES.get(entry.getValue());
+            if (state == null || state.blockedUntil <= nowMillis) continue;
+            Room candidate = entry.getKey();
+            Room previous = oldest.get(entry.getValue());
+            if (previous == null || candidate.getCreatedAtMillis() < previous.getCreatedAtMillis()
+                    || candidate.getCreatedAtMillis() == previous.getCreatedAtMillis() && candidate.getId() < previous.getId()) {
+                oldest.put(entry.getValue(), candidate);
+            }
+        }
+        List<Room> result = new ArrayList<>();
+        for (Map.Entry<Room, String> entry : ROOM_NAMES.entrySet()) {
+            Room retained = oldest.get(entry.getValue());
+            if (retained != null && retained != entry.getKey() && emptyWaitingRoom(entry.getKey())) {
+                result.add(entry.getKey());
+            }
+        }
+        return result;
+    }
+
+    private static void cleanupNames(long nowMillis) {
+        NAME_STATES.values().removeIf(state -> state.blockedUntil <= nowMillis
+                && (state.creates.isEmpty() || state.creates.peekLast().time < nowMillis - NAME_WINDOW_MS));
     }
 
     private static String roomNameKey(String name) {
@@ -101,6 +161,10 @@ final class AbuseGuard {
     }
 
     static synchronized void logRejection(String ip, int shard, String reason, long nowMillis) {
+        logRejection(ip, shard, reason, nowMillis, null);
+    }
+
+    static synchronized void logRejection(String ip, int shard, String reason, long nowMillis, String name) {
         IpState state = IP_STATES.get(normalizeIp(ip));
         if (nowMillis - logWindowStarted >= 10000L) {
             logWindowStarted = nowMillis;
@@ -113,13 +177,17 @@ final class AbuseGuard {
         rejectionLogs++;
         if (state != null) state.nextRejectionLogMillis = nowMillis + 10000L;
         long retryMillis = state == null ? 0 : Math.max(0, state.createBlockedUntilMillis - nowMillis);
+        NameState nameState = name == null ? null : NAME_STATES.get(roomNameKey(name));
+        long nameRetryMillis = nameState == null ? 0 : Math.max(0, nameState.blockedUntil - nowMillis);
         System.out.println("[ABUSE_REJECT] time=" + Instant.ofEpochMilli(nowMillis)
                 + " ip=" + normalizeIp(ip) + " shard=" + shard + " reason=" + reason
-                + " createCooldownMs=" + retryMillis + " suppressedSinceLastLog=" + suppressedLogs);
+                + " createCooldownMs=" + retryMillis + " suppressedSinceLastLog=" + suppressedLogs
+                + (name == null ? "" : " name=[" + name + "] nameCooldownMs=" + nameRetryMillis));
         suppressedLogs = 0;
     }
 
     static synchronized int cleanup(long nowMillis) {
+        cleanupNames(nowMillis);
         int before = IP_STATES.size();
         IP_STATES.values().removeIf(state -> {
             pruneOlderThan(state.creates, nowMillis - CREATE_LONG_WINDOW_MS);
@@ -159,5 +227,12 @@ final class AbuseGuard {
         long createBlockedUntilMillis;
         long lastSeenMillis;
         long nextRejectionLogMillis;
+    }
+
+    private record NameCreate(long time, String ip) {}
+
+    private static final class NameState {
+        final Deque<NameCreate> creates = new ArrayDeque<>();
+        long blockedUntil;
     }
 }

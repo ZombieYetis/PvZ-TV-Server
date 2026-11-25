@@ -270,6 +270,59 @@ public class ServerIntegrationTest {
         return ByteBuffer.allocate(text.length + 1).put((byte) 0xff).put(text).array();
     }
 
+    @Test public void rotatingSourceIpsCannotKeepDuplicateEmptyRoomsInLobby() throws Exception {
+        int base = availableBase();
+        Path directory = Files.createTempDirectory(Path.of("target"), "server-name-burst-").toAbsolutePath();
+        Process process = startServer(base, directory);
+        List<Socket> hosts = new ArrayList<>();
+        try {
+            awaitReady(base, process);
+            List<Integer> ids = new ArrayList<>();
+            for (int i = 0; i < 5; i++) {
+                Socket socket = new Socket();
+                hosts.add(socket);
+                socket.bind(new InetSocketAddress("127.0.0." + (i + 2), 0));
+                socket.connect(new InetSocketAddress("127.0.0.1", base), 2000);
+                socket.setSoTimeout(5000);
+                if (i < 4) {
+                    socket.getOutputStream().write(createRoomCommand("repeat-ad".getBytes(StandardCharsets.UTF_8)));
+                    ids.add(ByteBuffer.wrap(frame(socket, 0x81)).getInt());
+                }
+            }
+            try (Socket guest = connect(base)) {
+                guest.getOutputStream().write(joinRoomCommand(3, ids.get(1), "guest".getBytes(StandardCharsets.UTF_8)));
+                assertEquals(1, frame(guest, 0x83)[0]);
+                frame(hosts.get(1), 0x84);
+                Socket attacker = hosts.get(4);
+                attacker.getOutputStream().write(createRoomCommand("repeat-ad".getBytes(StandardCharsets.UTF_8)));
+                frame(attacker, 0xFF);
+                assertEquals(0, frame(hosts.get(2), 0x86).length);
+                assertEquals(0, frame(hosts.get(3), 0x86).length);
+                attacker.getOutputStream().write(2);
+                byte[] listed = frame(attacker, 0x82);
+                // A full room with spectating disabled is intentionally hidden by the lobby.
+                assertEquals(1, listed[0]);
+                assertEquals(ids.get(0).intValue(), ByteBuffer.wrap(listed, 1, 4).getInt());
+                hosts.get(2).getOutputStream().write(createRoomCommand("repeat-ad".getBytes(StandardCharsets.UTF_8)));
+                frame(hosts.get(2), 0xFF);
+                hosts.get(2).getOutputStream().write(createRoomCommand("normal".getBytes(StandardCharsets.UTF_8)));
+                frame(hosts.get(2), 0x81);
+                // The room that had a guest remains playable after cleanup.
+                hosts.get(1).getOutputStream().write(5);
+                byte[] epoch = frame(hosts.get(1), 0x85);
+                assertArrayEquals(epoch, frame(guest, 0x85));
+            }
+            String log = Files.readString(directory.resolve("server.log"));
+            assertTrue(log, log.contains("reason=NAME_BURST"));
+            assertTrue(log, log.contains("name=[repeat-ad] nameCooldownMs="));
+            assertTrue(log, log.contains("[ROOM_SPAM_CLEAN]"));
+        } finally {
+            for (Socket host : hosts) host.close();
+            process.destroyForcibly();
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+        }
+    }
+
     private static byte[] joinRoomCommand(int command, int roomId, byte[] name) {
         return ByteBuffer.allocate(10 + name.length).put((byte) command).putInt(roomId)
                 .putInt(3215).put((byte) name.length).put(name).array();
