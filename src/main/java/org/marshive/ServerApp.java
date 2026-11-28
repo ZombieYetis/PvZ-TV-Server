@@ -43,6 +43,8 @@ public class ServerApp {
                 shardCount = parseIntSafe(a.substring("--shards=".length()), shardCount);
             } else if (a.startsWith("--dashboard=")) {
                 dashboardEnabled = parseBoolSafe(a.substring("--dashboard=".length()), false);
+            } else if (a.startsWith("--metrics-versions=")) {
+                AnalyticsCollector.configureSettlementVersions(a.substring("--metrics-versions=".length()));
             } else if (a.startsWith("--replicate_to=")) {
                 String target = a.substring("--replicate_to=".length()).trim();
                 int p = target.lastIndexOf(':');

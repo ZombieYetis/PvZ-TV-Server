@@ -12,12 +12,22 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.nio.charset.StandardCharsets;
 
 final class AnalyticsCollector {
+    private static Set<Long> settlementVersions = Set.of(3227L);
     private static final int MAX_FINAL_PICKS_PER_SIDE = 8;
     private static final int MAX_EVENTS = 512;
     private static final int MAX_STATS_CARDS = 4096;
     private static final ConcurrentHashMap<Integer, CardStats> STATS = new ConcurrentHashMap<>();
 
     private AnalyticsCollector() {
+    }
+
+    static void configureSettlementVersions(String value) {
+        Set<Long> versions = new LinkedHashSet<>();
+        for (String item : value.split(",", -1)) {
+            versions.add(parseNetplayVersion(item.trim()));
+        }
+        settlementVersions = Set.copyOf(versions);
+        System.out.println("[SETTLE] accepting netplay versions " + versions);
     }
 
     static void onMatchStart(int roomId) {
@@ -63,6 +73,8 @@ final class AnalyticsCollector {
             boolean plantWin = "PLANT_WIN".equals(winner);
             boolean zombieWin = "ZOMBIE_WIN".equals(winner);
             if (!plantWin && !zombieWin) return "ERR";
+            SettlementMeta meta = parseMeta(metaRaw);
+            if (!settlementVersions.contains(meta.netplayVersion)) return "ERR";
 
             List<MatchEvent> events = new ArrayList<>();
             if (!eventsRaw.isEmpty()) {
@@ -86,7 +98,6 @@ final class AnalyticsCollector {
 
             Set<Integer> plantCards = collectFinalPicks(events, "PLANT");
             Set<Integer> zombieCards = collectFinalPicks(events, "ZOMBIE");
-            SettlementMeta meta = parseMeta(metaRaw);
             MetricsStore.RecordResult dbResult = MetricsStore.recordMatch(settleId, roomId, plantWin, mainCounter, plantCards, zombieCards, events, meta);
             if (dbResult == MetricsStore.RecordResult.DUPLICATE) return "OK_DUP";
             if (dbResult == MetricsStore.RecordResult.FAILED) return "ERR";
@@ -110,6 +121,11 @@ final class AnalyticsCollector {
             if (p <= 0) continue;
             String k = kv.substring(0, p).trim();
             String v = kv.substring(p + 1).trim();
+            if ("netplay_version".equals(k)) {
+                if (netplayVersion != null) throw new IllegalArgumentException("Duplicate netplay_version");
+                netplayVersion = v;
+                continue;
+            }
             try {
                 switch (k) {
                     case "bg":
@@ -123,9 +139,6 @@ final class AnalyticsCollector {
                         break;
                     case "game_mode":
                         gameMode = v.toUpperCase(Locale.ROOT);
-                        break;
-                    case "netplay_version":
-                        netplayVersion = v;
                         break;
                     case "addon_ep":
                         m.addonExtraPackets = "1".equals(v);

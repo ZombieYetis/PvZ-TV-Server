@@ -120,6 +120,6 @@ public class ResourceProtectionTest {
     @Test public void oversizedSettlementAndEventListAreRejectedBeforeDatabaseWork() {
         assertEquals("ERR", AnalyticsCollector.ingestSettlement("x".repeat(ResourceLimits.MAX_SETTLEMENT_BYTES + 1)));
         assertEquals("ERR", AnalyticsCollector.ingestSettlement("SETTLE|test|1|PLANT_WIN|1|"
-                + "1,P,K,0;".repeat(513) + "|"));
+                + "1,P,K,0;".repeat(513) + "|netplay_version=3227"));
     }
 }

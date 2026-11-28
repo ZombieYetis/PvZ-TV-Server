@@ -30,19 +30,26 @@ public class ServerIntegrationTest {
                 }
             }
             assertEquals("ERR", metrics(base, "SETTLE|broken\n"));
-            String settlement = "SETTLE|integration-test|1|PLANT_WIN|100|0,P,K,0|plant_name=Test\n";
+            String settlement = "SETTLE|integration-test|1|PLANT_WIN|100|0,P,K,0|plant_name=Test&netplay_version=3227\n";
             assertEquals("OK", metrics(base, settlement));
             assertEquals("OK_DUP", metrics(base, settlement));
             assertEquals("OK", metrics(base, "SETTLE|event-limit|1|PLANT_WIN|100|"
-                    + "0,P,K,0;".repeat(512) + "|plant_name=Test\n"));
+                    + "0,P,K,0;".repeat(512) + "|plant_name=Test&netplay_version=3227\n"));
+            for (String version : List.of("", "&netplay_version=3228", "&netplay_version=3307",
+                    "&netplay_version=3307&netplay_version=3227")) {
+                assertEquals("ERR", metrics(base, "SETTLE|rejected-version|1|PLANT_WIN|100|0,P,K,0"
+                        + "|plant_name=WrongVersion" + version + "\n"));
+            }
+            assertEquals("ERR", metrics(base, "SETTLE|1|PLANT_WIN|100|0,P,K,0\n"));
 
             String stream = httpGet(base + 4000, "/api/stream");
             assertTrue(stream.contains("retry: 15000"));
             assertTrue(stream.contains("event: settle"));
             assertTrue(httpGet(base + 4000, "/api/recent-matches").contains("Test"));
+            assertFalse(httpGet(base + 4000, "/api/recent-matches").contains("WrongVersion"));
             verifyExtendedCardStatistics(base);
             verifyModeSettlements(base, directory);
-            verifyVersionStatistics(base);
+            verifyVersionStatistics(base, directory);
             rejectControlFlood(base);
             relayRoundTrip(base);
             reconnectRoundTrip(base);
@@ -51,6 +58,31 @@ public class ServerIntegrationTest {
             assertFalse(Files.readString(log).contains("OutOfMemoryError"));
         } catch (Throwable error) {
             throw new AssertionError("Server log:\n" + Files.readString(log), error);
+        } finally {
+            process.destroyForcibly();
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test public void acceptsAdditionalExplicitlyConfiguredSettlementVersions() throws Exception {
+        int base = availableBase();
+        Path directory = Files.createTempDirectory(Path.of("target"), "metrics-version-allowlist-").toAbsolutePath();
+        Process process = startServer(base, directory, "--metrics-versions=3227,3307");
+        try {
+            awaitReady(base, process);
+            for (int version : List.of(3227, 3307, 3228)) {
+                assertEquals(version == 3228 ? "ERR" : "OK", metrics(base,
+                        "SETTLE|allowlist-" + version + "|1|PLANT_WIN|100||netplay_version=" + version + "\n"));
+            }
+            try (var db = java.sql.DriverManager.getConnection("jdbc:sqlite:" + directory.resolve("data/pvz_metrics.db"));
+                 var statement = db.createStatement();
+                 var rows = statement.executeQuery("SELECT netplay_version FROM match_results ORDER BY netplay_version")) {
+                assertTrue(rows.next());
+                assertEquals(3227, rows.getLong(1));
+                assertTrue(rows.next());
+                assertEquals(3307, rows.getLong(1));
+                assertFalse(rows.next());
+            }
         } finally {
             process.destroyForcibly();
             assertTrue(process.waitFor(10, TimeUnit.SECONDS));
@@ -82,10 +114,10 @@ public class ServerIntegrationTest {
             try {
                 awaitReady(base, process);
                 assertEquals(restart == 0 ? "OK" : "OK_DUP", metrics(base,
-                        "SETTLE|after-version|1|PLANT_WIN|100||game_mode=NORMAL&netplay_version=3212\n"));
-                assertEquals("{\"items\":[3212]}", httpGet(base + 4000, "/api/versions"));
+                        "SETTLE|after-version|1|PLANT_WIN|100||game_mode=NORMAL&netplay_version=3227\n"));
+                assertEquals("{\"items\":[3227]}", httpGet(base + 4000, "/api/versions"));
                 assertTrue(httpGet(base + 4000, "/api/recent-matches").contains("Historical"));
-                assertFalse(httpGet(base + 4000, "/api/recent-matches?netplay_version=3212").contains("Historical"));
+                assertFalse(httpGet(base + 4000, "/api/recent-matches?netplay_version=3227").contains("Historical"));
                 try (java.sql.Connection conn = java.sql.DriverManager.getConnection(dbUrl);
                      java.sql.Statement st = conn.createStatement();
                      java.sql.ResultSet rs = st.executeQuery("SELECT settle_id,netplay_version FROM match_results ORDER BY id")) {
@@ -94,7 +126,7 @@ public class ServerIntegrationTest {
                     assertEquals(0, rs.getLong(2));
                     assertTrue(rs.next());
                     assertEquals("after-version", rs.getString(1));
-                    assertEquals(3212, rs.getLong(2));
+                    assertEquals(3227, rs.getLong(2));
                     assertFalse(rs.next());
                 }
             } catch (Throwable error) {
@@ -394,7 +426,8 @@ public class ServerIntegrationTest {
         // Use deliberately reversed side labels to verify classification by the game's card IDs.
         String events = "0,Z,K,209;1,Z,K,210;2,Z,K,1;3,Z,K,211;4,Z,K,0;"
                 + "5,P,K,102;6,P,K,103;7,P,K,104;8,P,K,62;9,P,K,106";
-        String meta = "bg=0&addon_ep=0&addon_bp=1&addon_ban=0&plant_use=209:3,210:2&zombie_use=102:3,103:2";
+        String meta = "bg=0&addon_ep=0&addon_bp=1&addon_ban=0&plant_use=209:3,210:2&zombie_use=102:3,103:2"
+                + "&netplay_version=3227";
         assertEquals("OK", metrics(base, "SETTLE|extended-cards|2|PLANT_WIN|100|" + events + "|" + meta + "\n"));
         String filters = "&extra_packet=false&ban_mode=false&mode=DAY";
         String plants = httpGet(base + 4000, "/api/card-stats?side=PLANT" + filters);
@@ -421,9 +454,9 @@ public class ServerIntegrationTest {
             };
             assertEquals("OK", metrics(base, "SETTLE|mode-" + mode + "|3|" + winner + "|100|" + events
                     + "|bg=1&battle=10&game_mode=" + mode + "&addon_ep=0&addon_ban=0&plant_use=" + usage
-                    + "&plant_name=player-" + mode + "\n"));
+                    + "&plant_name=player-" + mode + "&netplay_version=3227\n"));
         }
-        assertEquals("ERR", metrics(base, "SETTLE|invalid-mode|3|PLANT_WIN|100||game_mode=INVALID\n"));
+        assertEquals("ERR", metrics(base, "SETTLE|invalid-mode|3|PLANT_WIN|100||game_mode=INVALID&netplay_version=3227\n"));
         try (java.sql.Connection conn = java.sql.DriverManager.getConnection(
                 "jdbc:sqlite:" + directory.resolve("data/pvz_metrics.db"));
              java.sql.Statement st = conn.createStatement();
@@ -440,12 +473,12 @@ public class ServerIntegrationTest {
         }
         // An old balance-off match remains NORMAL; it must not be inferred to be CLASSIC.
         assertEquals("OK", metrics(base, "SETTLE|legacy-switches|3|PLANT_WIN|100|" + events
-                + "|bg=1&addon_es=0&addon_bp=0&addon_ep=0&addon_ban=0&plant_use=0:1,2:1\n"));
+                + "|bg=1&addon_es=0&addon_bp=0&addon_ep=0&addon_ban=0&plant_use=0:1,2:1&netplay_version=3227\n"));
         // These must stay outside the selected map / ban / extra-slot scope.
         for (String variant : new String[]{"bg=0&addon_ep=0&addon_ban=0",
                 "bg=1&addon_ep=0&addon_ban=1", "bg=1&addon_ep=1&addon_ban=0"}) {
             assertEquals("OK", metrics(base, "SETTLE|other-" + variant + "|3|ZOMBIE_WIN|100|"
-                    + events + ";5,P,K,6|game_mode=NORMAL&" + variant + "&plant_use=3:500,4:400\n"));
+                    + events + ";5,P,K,6|game_mode=NORMAL&" + variant + "&plant_use=3:500,4:400&netplay_version=3227\n"));
         }
         String filters = "?side=PLANT&extra_packet=false&ban_mode=false&mode=NIGHT";
         String cards = httpGet(base + 4000, "/api/card-stats" + filters);
@@ -466,7 +499,7 @@ public class ServerIntegrationTest {
         }
         // A database with only shuffle data for this map must yield no dashboard statistics.
         assertEquals("OK", metrics(base, "SETTLE|shuffle-no-picks|3|PLANT_WIN|100||"
-                + "game_mode=SHUFFLE&bg=4&plant_use=0:2&addon_ep=0&addon_ban=0\n"));
+                + "game_mode=SHUFFLE&bg=4&plant_use=0:2&addon_ep=0&addon_ban=0&netplay_version=3227\n"));
         String empty = "?mode=ROOF&extra_packet=false&ban_mode=false";
         assertEquals("{\"items\":[]}", httpGet(base + 4000, "/api/card-stats" + empty));
         assertEquals("{\"items\":[],\"total_plays\":0}", httpGet(base + 4000, "/api/top-decks" + empty));
@@ -504,27 +537,37 @@ public class ServerIntegrationTest {
         Files.writeString(directory.resolve("dashboard.html"), dashboard);
     }
 
-    private void verifyVersionStatistics(int base) throws Exception {
-        assertEquals("{\"items\":[]}", httpGet(base + 4000, "/api/versions"));
+    private void verifyVersionStatistics(int base, Path directory) throws Exception {
+        assertEquals("{\"items\":[3227]}", httpGet(base + 4000, "/api/versions"));
         String events = "0,P,K,0;1,P,K,2;2,P,K,3;3,P,K,4;4,P,K,5";
-        String meta = "bg=2&game_mode=NORMAL&addon_ep=0&addon_ban=0";
+        String meta = "bg=2&game_mode=NORMAL&addon_ep=0&addon_ban=0&netplay_version=3227";
         assertEquals("OK", metrics(base, "SETTLE|v-legacy|5|ZOMBIE_WIN|100|" + events
                 + "|" + meta + "&plant_name=ver-unknown\n"));
         for (int version : new int[]{9, 10, 3212}) {
             String winner = version == 10 ? "ZOMBIE_WIN" : "PLANT_WIN";
             String usage = version == 10 ? "3:200,4:100" : "0:20,2:10";
             assertEquals("OK", metrics(base, "SETTLE|v-" + version + "|5|" + winner + "|100|" + events
-                    + "|" + meta + "&netplay_version=" + version + "&plant_name=ver-" + version + "&plant_use=" + usage + "\n"));
-            if (version == 9) assertEquals("{\"items\":[9]}", httpGet(base + 4000, "/api/versions"));
+                    + "|" + meta + "&plant_name=ver-" + version + "&plant_use=" + usage + "\n"));
         }
         assertEquals("OK", metrics(base, "SETTLE|v-duplicate-version|5|ZOMBIE_WIN|100|" + events
-                + "|" + meta + "&netplay_version=3212&plant_name=ver-3212-second&plant_use=0:20,2:10\n"));
+                + "|" + meta + "&plant_name=ver-3212-second&plant_use=0:20,2:10\n"));
         // Higher versions reported only by excluded modes must not displace visible versions.
         for (String mode : new String[]{"CLASSIC", "SHUFFLE"}) {
             assertEquals("OK", metrics(base, "SETTLE|v-" + mode + "|5|ZOMBIE_WIN|100|" + events
-                    + "|" + meta.replace("NORMAL", mode) + "&netplay_version=4000&plant_name=ver-hidden&plant_use=3:900,4:800\n"));
+                    + "|" + meta.replace("NORMAL", mode) + "&plant_name=ver-hidden&plant_use=3:900,4:800\n"));
         }
-        assertEquals("{\"items\":[3212,10]}", httpGet(base + 4000, "/api/versions"));
+        // Model historical rows without weakening the live settlement allowlist.
+        try (var database = java.sql.DriverManager.getConnection("jdbc:sqlite:" + directory.resolve("data/pvz_metrics.db"));
+             var update = database.prepareStatement("UPDATE match_results SET netplay_version=? WHERE settle_id=?")) {
+            Map<String, Integer> historical = Map.of("v-legacy", 0, "v-9", 9, "v-10", 10,
+                    "v-3212", 3212, "v-duplicate-version", 3212, "v-CLASSIC", 4000, "v-SHUFFLE", 4000);
+            for (var row : historical.entrySet()) {
+                update.setInt(1, row.getValue());
+                update.setString(2, row.getKey());
+                assertEquals(1, update.executeUpdate());
+            }
+        }
+        assertEquals("{\"items\":[3227,3212]}", httpGet(base + 4000, "/api/versions"));
         String filters = "?side=PLANT&extra_packet=false&ban_mode=false&mode=POOL";
         String allCards = httpGet(base + 4000, "/api/card-stats" + filters);
         assertTrue(allCards, allCards.contains("\"seed_type\":5,\"picked\":5,\"banned\":0,\"won\":2"));
@@ -567,8 +610,8 @@ public class ServerIntegrationTest {
             assertEquals("{\"items\":[]}", httpGet(base + 4000, "/api/card-stats" + changed + "&netplay_version=3212"));
         }
         assertEquals("ERR", metrics(base, "SETTLE|v-invalid|5|PLANT_WIN|100||netplay_version=4294967296\n"));
-        assertEquals("OK", metrics(base, "SETTLE|v-new|5|PLANT_WIN|100||game_mode=NORMAL&netplay_version=3213\n"));
-        assertEquals("{\"items\":[3213,3212]}", httpGet(base + 4000, "/api/versions"));
+        assertEquals("OK", metrics(base, "SETTLE|v-new|5|PLANT_WIN|100||game_mode=NORMAL&netplay_version=3227\n"));
+        assertEquals("{\"items\":[3227,3212]}", httpGet(base + 4000, "/api/versions"));
         String dashboard = httpGet(base + 4000, "/data/");
         assertTrue(dashboard.contains("id=\"versionSel\""));
         assertTrue(dashboard.contains("value=\"all\""));
