@@ -182,8 +182,8 @@ final class AbuseGuard {
     private static String roomNameKey(String name) {
         if (name.startsWith("[VS]")) name = name.substring(4);
         else if (name.startsWith("[COOP]")) name = name.substring(6);
-        return Normalizer.normalize(name, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT)
-                .replace("\u200D", "").replace("\uFE0E", "").replace("\uFE0F", "").strip();
+        return Normalizer.normalize(NameMatchText.withoutIgnorables(name), Normalizer.Form.NFKC)
+                .toLowerCase(Locale.ROOT).strip();
     }
 
     private static String createRateRejection(String ip, long nowMillis) {

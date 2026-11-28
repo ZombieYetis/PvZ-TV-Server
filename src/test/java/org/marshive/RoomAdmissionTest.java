@@ -57,6 +57,10 @@ public class RoomAdmissionTest {
         assertEquals("WAITING_ROOMS_NAME",
                 second.tryCreateRoom("[VS]re\u200Dpeat", host(second, "invisible-ip"), 3215).rejection());
         assertEquals("WAITING_ROOMS_NAME",
+                second.tryCreateRoom("[VS]re\u034Fpeat", host(second, "cgj-ip"), 3215).rejection());
+        assertEquals("WAITING_ROOMS_NAME",
+                second.tryCreateRoom("[VS]re\uFE00peat", host(second, "selector-ip"), 3215).rejection());
+        assertEquals("WAITING_ROOMS_NAME",
                 second.tryCreateRoom("[VS]\u00A0repeat\u00A0", host(second, "space-ip"), 3215).rejection());
         assertNotNull(second.tryCreateRoom("different", host(second, "tenth-ip"), 3215).room());
         firstRoom.setGaming(true);

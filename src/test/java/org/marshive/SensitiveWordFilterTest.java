@@ -143,4 +143,61 @@ public class SensitiveWordFilterTest {
         assertEquals("parsee", policy.playerName("parsee"));
         assertEquals("[VS]****", policy.roomName("[VS]ARSE"));
     }
+
+    @Test public void invisibleCharactersCannotSplitBlockedWordsOrHideTheirVisiblePrefix() throws Exception {
+        SensitiveWordFilter filter = new SensitiveWordFilter(List.of("b站找", "arse"));
+        int[] invisible = {0x00AD, 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5,
+                0x180B, 0x180D, 0x180F, 0x200B, 0x200C, 0x200D, 0x2060, 0x2065, 0x3164,
+                0xFE00, 0xFE0E, 0xFE0F, 0xFEFF, 0xFFA0, 0xFFF0, 0x1BCA0, 0x1D173,
+                0xE0000, 0xE0001, 0xE0020, 0xE007F, 0xE0100, 0xE01EF, 0xE0FFF};
+        for (int point : invisible) {
+            String hidden = new String(Character.toChars(point));
+            for (String input : List.of("b" + hidden + "站找", "b站" + hidden + "找", "ar" + hidden + "se")) {
+                String masked = mask(filter, input);
+                assertTrue("Unmasked U+" + Integer.toHexString(point), masked.matches("\\*+"));
+            }
+        }
+        // All standard and supplementary variation selectors, including non-emoji selectors.
+        for (int point : IntStream.concat(IntStream.rangeClosed(0xFE00, 0xFE0F),
+                IntStream.rangeClosed(0xE0100, 0xE01EF)).toArray()) {
+            assertEquals("***", mask(filter, "b" + new String(Character.toChars(point)) + "站找"));
+        }
+        assertEquals("**", filter.mask("b\u034F站找", 5));
+        PlayerNamePolicy policy = new PlayerNamePolicy(filter);
+        assertEquals("[VS]***", policy.roomName("[VS]b\u034F站找"));
+        assertEquals("***", policy.playerName("b\uFE00站找"));
+    }
+
+    @Test public void lookalikesMaskAdsAndMixedScriptProfanityButRespectWordBoundaries() {
+        SensitiveWordFilter filter = SensitiveWordFilter.bundled();
+        for (String letter : List.of("ь", "Ь", "в", "В", "β", "Β", "ʙ", "ｂ", "𝐛")) {
+            for (String suffix : List.of("站找", "站搜", "站查")) {
+                assertEquals("***", mask(filter, letter + suffix));
+                assertEquals("***", mask(filter, letter + "\u034F" + suffix));
+            }
+        }
+        assertEquals("************", mask(filter, "ВѴ1ь9уfzјЕfԁ"));
+        assertEquals("****", mask(filter, "Dіck"));
+        assertEquals("***", mask(filter, "аss"));
+        assertEquals("****", mask(filter, "аr\u034Fse"));
+        for (String name : List.of("pаrsee", "рarseе", "сlаss", "Cаssie", "Scunthоrpe", "ɑrsenal")) {
+            assertEquals(name, mask(filter, name));
+        }
+        PlayerNamePolicy policy = new PlayerNamePolicy(filter);
+        assertEquals("[VS]***", policy.roomName("[VS]ь\uFE00站找"));
+        assertEquals("**", filter.mask("ь站找", 4));
+        assertEquals("рars", filter.mask("рarseе", 5));
+    }
+
+    @Test public void normalForeignNamesAccentsEmojiAndSpacingRemainUnchanged() throws Exception {
+        SensitiveWordFilter filter = new SensitiveWordFilter(List.of("b站找", "ass", "arse", "dick"));
+        for (String name : List.of("Василий", "Борис", "Саша", "Νίκος", "асс", "і", "ь", "β",
+                "Léa", "e\u0301arse", "éarse", "arseé", "👩🏽‍💻", "👨‍👩‍👧‍👦", "☀\uFE0F",
+                "葛\uDB40\uDD00", "普通\u034F名字", "小草", "操作", "b 站找", "b-站找", "b\u0301站找")) {
+            assertEquals(name, mask(filter, name));
+        }
+        Path directory = temporary.newFolder().toPath();
+        Files.writeString(directory.resolve("广告.txt"), "b站找\n");
+        assertEquals("***", mask(SensitiveWordFilter.fromDirectory(directory), "ь\u034F站找"));
+    }
 }

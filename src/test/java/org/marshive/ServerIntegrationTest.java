@@ -192,6 +192,53 @@ public class ServerIntegrationTest {
         }
     }
 
+    @Test public void invisibleAndLookalikeNamesAreMaskedOnTheWireWithBothDictionaries() throws Exception {
+        for (boolean custom : new boolean[]{false, true}) {
+            int base = availableBase();
+            Path directory = Files.createTempDirectory(Path.of("target"), "server-name-lookalikes-").toAbsolutePath();
+            if (custom) {
+                Files.createDirectories(directory.resolve("words"));
+                Files.writeString(directory.resolve("words/custom.txt"), "b站找,dick,arse");
+            }
+            Process process = startServer(base, directory, custom ? new String[]{"--sensitive-words-dir=words"} : new String[0]);
+            try {
+                awaitReady(base, process);
+                try (Socket host = connect(base); Socket guest = connect(base); Socket normalHost = connect(base)) {
+                    host.getOutputStream().write(createRoomCommand("[VS]ь\u034F站找".getBytes(StandardCharsets.UTF_8)));
+                    int roomId = ByteBuffer.wrap(frame(host, 0x81)).getInt();
+                    guest.getOutputStream().write(2);
+                    ByteBuffer rooms = ByteBuffer.wrap(frame(guest, 0x82));
+                    assertEquals(1, rooms.get());
+                    assertEquals(roomId, rooms.getInt());
+                    rooms.get();
+                    assertEquals(3215, rooms.getInt());
+                    byte[] displayed = new byte[Byte.toUnsignedInt(rooms.get())];
+                    rooms.get(displayed);
+                    assertEquals("[VS]***", new String(displayed, StandardCharsets.UTF_8));
+                    byte[] guestName = "Dі\uFE00ck".getBytes(StandardCharsets.UTF_8);
+                    guest.getOutputStream().write(ByteBuffer.allocate(10 + guestName.length).put((byte) 3)
+                            .putInt(roomId).putInt(3215).put((byte) guestName.length).put(guestName).array());
+                    byte[] joined = frame(guest, 0x83);
+                    assertEquals(1, joined[0]);
+                    assertEquals("[VS]***", new String(joined, 10, Byte.toUnsignedInt(joined[9]), StandardCharsets.UTF_8));
+                    ByteBuffer notice = ByteBuffer.wrap(frame(host, 0x84));
+                    assertEquals(roomId, notice.getInt());
+                    byte[] shownGuest = new byte[Byte.toUnsignedInt(notice.get())];
+                    notice.get(shownGuest);
+                    assertEquals("****", new String(shownGuest, StandardCharsets.UTF_8));
+                    String normal = "[VS]рarseе";
+                    normalHost.getOutputStream().write(createRoomCommand(normal.getBytes(StandardCharsets.UTF_8)));
+                    frame(normalHost, 0x81);
+                    normalHost.getOutputStream().write(2);
+                    assertTrue(new String(frame(normalHost, 0x82), StandardCharsets.UTF_8).contains(normal));
+                }
+            } finally {
+                process.destroyForcibly();
+                assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+            }
+        }
+    }
+
     @Test public void longNamesAreTruncatedAndPlayersCanStillCreateJoinSpectateAndPlay() throws Exception {
         int base = availableBase();
         Path directory = Files.createTempDirectory(Path.of("target"), "server-name-limits-").toAbsolutePath();

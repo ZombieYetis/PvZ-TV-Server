@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-/** Literal Unicode matching, following PvZ Ultimate's public room-name masking policy. */
+/** Unicode word matching with conservative lookalike checks and original display preservation. */
 final class SensitiveWordFilter {
     private static final int MAX_FILES = 16;
     private static final int MAX_FILE_BYTES = 1024 * 1024;
@@ -61,6 +61,9 @@ final class SensitiveWordFilter {
             }
             node.terminal = true;
             node.wholeLatinWord = normalized.codePoints().allMatch(SensitiveWordFilter::isLatinWordPart);
+            node.confusableContext = normalized.codePoints().anyMatch(p -> isHan(p) || p >= '0' && p <= '9');
+            node.confusableEligible = normalized.codePoints().anyMatch(SensitiveWordFilter::isAsciiLatin)
+                    && normalized.codePoints().allMatch(p -> isAsciiLatin(p) || isHan(p) || p >= '0' && p <= '9');
         }
         if (normalizedWords.isEmpty()) throw new IOException("Sensitive-word list is empty");
         maximumWordLength = longest;
@@ -157,21 +160,16 @@ final class SensitiveWordFilter {
         int[] normalized = normalizedPoints.build().toArray();
         int[] sources = elementIndexes.build().toArray();
         int[] coverage = new int[elements.size() + 1];
-        boolean changed = false;
-        for (int start = 0; start < normalized.length; start++) {
-            Node node = root;
-            for (int end = start; end < Math.min(normalized.length, start + maximumWordLength); end++) {
-                node = node.children.get(normalized[end]);
-                if (node == null) break;
-                if (node.terminal && (!node.wholeLatinWord
-                        || ((start == 0 || !isLatinWordPart(normalized[start - 1]))
-                        && (end + 1 == normalized.length || !isLatinWordPart(normalized[end + 1]))))) {
-                    coverage[sources[start]]++;
-                    coverage[sources[end] + 1]--;
-                    changed = true;
-                }
+        boolean changed = coverMatches(normalized, normalized, sources, coverage, false);
+        int[] lookalikes = null;
+        for (int i = 0; i < normalized.length; i++) {
+            int point = NameMatchText.latinLookalike(normalized[i]);
+            if (point != normalized[i]) {
+                if (lookalikes == null) lookalikes = normalized.clone();
+                lookalikes[i] = point;
             }
         }
+        if (lookalikes != null) changed |= coverMatches(lookalikes, normalized, sources, coverage, true);
         if (!changed) return value.substring(0, visibleEnd);
         StringBuilder result = new StringBuilder(value.length());
         int active = 0;
@@ -182,9 +180,46 @@ final class SensitiveWordFilter {
         return result.toString();
     }
 
+    private boolean coverMatches(int[] normalized, int[] original, int[] sources, int[] coverage, boolean lookalikes) {
+        boolean changed = false;
+        for (int start = 0; start < normalized.length; start++) {
+            Node node = root;
+            boolean hasLatin = false;
+            boolean substituted = false;
+            for (int end = start; end < Math.min(normalized.length, start + maximumWordLength); end++) {
+                node = node.children.get(normalized[end]);
+                if (node == null) break;
+                hasLatin |= isAsciiLatin(original[end]);
+                substituted |= normalized[end] != original[end];
+                // Pure foreign-script words are not reinterpreted as English profanity.
+                // Chinese phrases and explicit alphanumeric codes provide their own context.
+                if (lookalikes && (!substituted || !node.confusableEligible
+                        || !node.confusableContext && !hasLatin)) continue;
+                if (node.terminal && (!node.wholeLatinWord
+                        || ((start == 0 || !isNameWordPart(original[start - 1]))
+                        && (end + 1 == normalized.length || !isNameWordPart(original[end + 1]))))) {
+                    coverage[sources[start]]++;
+                    coverage[sources[end] + 1]--;
+                    changed = true;
+                }
+            }
+        }
+        return changed;
+    }
+
     private static String normalize(String value) {
-        return Normalizer.normalize(value, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT)
-                .replace("\u200D", "").replace("\uFE0E", "").replace("\uFE0F", "").replace("ß", "ss").replace('ς', 'σ');
+        return Normalizer.normalize(NameMatchText.withoutIgnorables(value), Normalizer.Form.NFKC)
+                .toLowerCase(Locale.ROOT).replace("ß", "ss").replace('ς', 'σ');
+    }
+
+    private static boolean isAsciiLatin(int point) { return point >= 'a' && point <= 'z'; }
+
+    private static boolean isHan(int point) { return Character.UnicodeScript.of(point) == Character.UnicodeScript.HAN; }
+
+    private static boolean isNameWordPart(int point) {
+        Character.UnicodeScript script = Character.UnicodeScript.of(point);
+        return isLatinWordPart(point) || Character.isLetter(point)
+                && (script == Character.UnicodeScript.CYRILLIC || script == Character.UnicodeScript.GREEK);
     }
 
     private static boolean isLatinWordPart(int point) {
@@ -198,5 +233,7 @@ final class SensitiveWordFilter {
         final Map<Integer, Node> children = new HashMap<>();
         boolean terminal;
         boolean wholeLatinWord;
+        boolean confusableEligible;
+        boolean confusableContext;
     }
 }
